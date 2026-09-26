@@ -22,6 +22,7 @@ members = [
     "crates/app-host",
     "crates/app-validator",
     "crates/app-hub-app",
+    "crates/app-runtime",
 ]
 
 # Builds resolve the pinned sources from the prepared sibling checkouts, as

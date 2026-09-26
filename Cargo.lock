@@ -1266,6 +1266,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "octosense-app-runtime"
+version = "0.1.0"
+dependencies = [
+ "octoscript-ui-l0",
+ "serde_json",
+]
+
+[[package]]
 name = "octosense-app-validator"
 version = "0.1.0"
 dependencies = [
