@@ -16,8 +16,19 @@ channel grant is limited to `agent.notify`; it does not grant the app's agent
 family or network access. Native-kit and existing script bundles retain their
 prior rendering path.
 
-The native validator loads the actual widget source and tests a state change
-through the same session API. A physical tap in the installed shell has not
-yet been captured as device evidence. State is currently in memory: durable
-storage, asynchronous effects, lifecycle budgets and explicit `app.logic@1`
-entrypoints remain Plan 06 work. `app.logic@1` is not advertised yet.
+When the manifest grants `storage`, the installed and reference hosts persist
+portable Card state in a host-owned `.host/card-state` file keyed by app ID.
+The file is outside the app's writable jail because it contains trusted value
+origins. Snapshots have a versioned format and a 1 MiB limit, and each write
+is also bounded by the app's declared storage quota. A state transition is
+shown only after its snapshot replaces the previous file; a failed save
+restores the previous in-memory state and keeps the app open. Without the
+storage grant, Card state is usable in memory for that instance and starts
+fresh on restart. The native validator loads actual widget source; restart,
+wrong-channel and failed-save cases are tested through the same session API.
+
+Physical tap/device evidence, migration across incompatible Card schemas,
+asynchronous effects, lifecycle budgets and explicit `app.logic@1` entrypoints
+remain Plan 06 work. Snapshot usage is capped independently of the isolate's
+file-jail usage, so combined quota accounting also remains. `app.logic@1` is
+not advertised yet.

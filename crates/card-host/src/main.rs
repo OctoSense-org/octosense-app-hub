@@ -206,7 +206,9 @@ impl App {
         settings.hosts.push(server.allowlist_entry());
         let origin = server.origin().to_string();
         self.assets = Some(server);
-        let session = match octosense_app_validator::CardSession::open(&args.bundle, &origin) {
+        let state = policy.allows("storage").then(|| octosense_app_validator::state_path(&args.app_data, &policy.app_id));
+        let storage = state.as_deref().map(|path| (path, policy.storage_bytes));
+        let session = match octosense_app_validator::CardSession::open_with_state(&args.bundle, &origin, storage) {
             Ok(session) => session,
             Err(e) => { error!("card-host: the card did not lower: {e}"); return; }
         };
@@ -265,8 +267,6 @@ impl AppMain for App {
                         Some(Ok(Some(source))) => card.set_text(cx, &source),
                         Some(Err(e)) => {
                             error!("card-host: Card event failed: {e}");
-                            self.session = None;
-                            card.set_text(cx, "");
                             break;
                         }
                         _ => {}

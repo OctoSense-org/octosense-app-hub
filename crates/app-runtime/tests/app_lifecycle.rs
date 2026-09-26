@@ -31,3 +31,14 @@ fn stale_instance_event_cannot_change_a_new_card() {
     assert!(!replacement.dispatch_native(old).unwrap().applied);
     assert_eq!(replacement.state("@card", "selected"), None);
 }
+
+#[test]
+fn saved_note_survives_process_restart() {
+    let mut first = CardRuntime::new(CARD, serde_json::json!({})).unwrap();
+    let event = NativeEvent::new(first.generation(), "root", "flip", None);
+    assert!(first.dispatch_native(event).unwrap().applied);
+    let bytes = first.snapshot_bytes().unwrap();
+    let mut restarted = CardRuntime::from_snapshot(CARD, serde_json::json!({}), &bytes).unwrap();
+    assert!(contains_text(&restarted.render().unwrap(), "on"));
+    assert!(!restarted.dispatch_native(NativeEvent::new(first.generation(), "root", "flip", None)).unwrap().applied);
+}

@@ -1178,7 +1178,7 @@ dependencies = [
 [[package]]
 name = "octoscript-makepad"
 version = "0.1.0"
-source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2#4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2"
+source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4fe5cc50b828a6dba10cc003b7e3b055a23b83b1#4fe5cc50b828a6dba10cc003b7e3b055a23b83b1"
 dependencies = [
  "octoscript-render",
  "octoscript-ui-l0",
@@ -1188,7 +1188,7 @@ dependencies = [
 [[package]]
 name = "octoscript-node"
 version = "0.1.0"
-source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2#4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2"
+source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4fe5cc50b828a6dba10cc003b7e3b055a23b83b1#4fe5cc50b828a6dba10cc003b7e3b055a23b83b1"
 
 [[package]]
 name = "octoscript-node"
@@ -1198,25 +1198,27 @@ source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=78f90f
 [[package]]
 name = "octoscript-render"
 version = "0.1.0"
-source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2#4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2"
+source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4fe5cc50b828a6dba10cc003b7e3b055a23b83b1#4fe5cc50b828a6dba10cc003b7e3b055a23b83b1"
 dependencies = [
  "makepad-script",
- "octoscript-node 0.1.0 (git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2)",
+ "octoscript-node 0.1.0 (git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4fe5cc50b828a6dba10cc003b7e3b055a23b83b1)",
  "serde_json",
 ]
 
 [[package]]
 name = "octoscript-ui-l0"
 version = "0.1.0"
+source = "git+https://github.com/OctoSense-org/Octoscript.git?rev=3c1c6bae8c037627f8610aafa2a3a4f1c56ac567#3c1c6bae8c037627f8610aafa2a3a4f1c56ac567"
 dependencies = [
  "blake3",
+ "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "octoscript-widgets"
 version = "0.1.0"
-source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2#4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2"
+source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4fe5cc50b828a6dba10cc003b7e3b055a23b83b1#4fe5cc50b828a6dba10cc003b7e3b055a23b83b1"
 dependencies = [
  "makepad-widgets",
  "serde_json",

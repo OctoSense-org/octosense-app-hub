@@ -55,6 +55,21 @@ impl CardRuntime {
 
     pub fn generation(&self) -> u64 { self.generation }
     pub fn store(&self) -> &InstanceStore { &self.state }
+    pub fn snapshot_bytes(&self) -> Result<Vec<u8>, String> { self.state.snapshot_bytes() }
+
+    pub fn from_snapshot(source: &str, data: Value, bytes: &[u8]) -> Result<Self, String> {
+        let mut runtime = Self::new(source, data)?;
+        runtime.state = InstanceStore::from_snapshot_bytes(bytes)?;
+        runtime.render()?;
+        Ok(runtime)
+    }
+
+    /// Roll back a staged transition when its durable write failed.
+    pub fn restore_snapshot(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.state = InstanceStore::from_snapshot_bytes(bytes)?;
+        self.render()?;
+        Ok(())
+    }
     pub fn state(&self, key: &str, field: &str) -> Option<&Value> { self.state.get(key, field) }
 
     pub fn render(&mut self) -> Result<UiNode, String> {

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, serde/JSON, the existing Hub policy/client, Makepad/Octoscript where applicable; additional service/storage adapters follow the [shared design](2026-09-24-app-store-design.md).
 
-**Status:** In progress. Bounded L0 event/state dispatch and shared native host wiring are implemented; durability, effects and device evidence remain. **Priority:** P0. **Phase:** B — Application platform. **Relative size:** L (complexity, not a delivery-date estimate).
+**Status:** In progress. Bounded L0 event/state dispatch, shared native host wiring and same-schema restart snapshots are implemented; effects, migration and device evidence remain. **Priority:** P0. **Phase:** B — Application platform. **Relative size:** L (complexity, not a delivery-date estimate).
 
 **Prerequisites:** [03 — Runnable bundle admission and actionable validation](2026-09-24-store-03-bundle-admission.md); [05 — Versioned runtime contracts and release compatibility](2026-09-24-store-05-runtime-compatibility.md)
 

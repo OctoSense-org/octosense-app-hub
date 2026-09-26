@@ -1,6 +1,7 @@
 //! Shared preparation used by installed Card hosts and the validator worker.
 //! Run validation through the Hub's bounded process interface for untrusted input.
 use std::path::Path;
+use std::io::{Read, Write};
 use octosense_app_hub::admission::{read_text, MAX_TEXT_BYTES};
 
 pub fn card_source(bundle: &Path, asset_origin: &str) -> Result<String, String> {
@@ -19,15 +20,23 @@ pub struct CardSession {
     kit: std::path::PathBuf,
     bundle: std::path::PathBuf,
     asset_origin: String,
+    state_path: Option<std::path::PathBuf>,
+    state_limit: u64,
 }
 
 impl CardSession {
     pub fn open(bundle: &Path, asset_origin: &str) -> Result<Self, String> {
+        Self::open_with_state(bundle, asset_origin, None)
+    }
+
+    /// State lives outside the app's writable jail; only the host may supply
+    /// this path after resolving the bundle's storage capability.
+    pub fn open_with_state(bundle: &Path, asset_origin: &str, storage: Option<(&Path, u64)>) -> Result<Self, String> {
     if bundle.join(octosense_app_policy::SCRIPT_ENTRY).is_file() {
         let source = read_text(&bundle.join(octosense_app_policy::SCRIPT_ENTRY), MAX_TEXT_BYTES)?;
         return Ok(Self { source: source.replace(octosense_app_policy::ASSETS_PLACEHOLDER, asset_origin.trim_end_matches('/')),
             runtime: None, channel: None, card: String::new(), data: serde_json::Value::Null,
-            kit: bundle.join("kit"), bundle: bundle.into(), asset_origin: asset_origin.into() });
+            kit: bundle.join("kit"), bundle: bundle.into(), asset_origin: asset_origin.into(), state_path: None, state_limit: 0 });
     }
     let card = read_text(&bundle.join("page.card"), 256 * 1024)?;
     let data_path = bundle.join("page.data.json");
@@ -36,17 +45,23 @@ impl CardSession {
     octosense_app_policy::rewrite_assets(&mut data, asset_origin);
     let prepared = octoscript_makepad::l0::prepare(&card, &data, &bundle.join("kit"))?;
     validate_resources(&prepared.tree, bundle, asset_origin)?;
-    let runtime = if prepared.native_components { None } else { Some(octosense_app_runtime::CardRuntime::new(&card, data.clone())?) };
+    let runtime = if prepared.native_components { None } else if let Some((path, limit)) = storage.filter(|(path, _)| path.is_file()) {
+        Some(octosense_app_runtime::CardRuntime::from_snapshot(&card, data.clone(), &read_snapshot(path, limit)?)?)
+    } else { Some(octosense_app_runtime::CardRuntime::new(&card, data.clone())?) };
+    if let Some(runtime) = &runtime { runtime.snapshot_bytes()?; }
     let channel = if runtime.is_some() {
         let mut nonce = [0u8; 16];
         rand_core::TryRngCore::try_fill_bytes(&mut rand_core::OsRng, &mut nonce).map_err(|e| format!("Card event channel: {e}"))?;
         Some(format!("octosense-card-runtime:{}", nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()))
     } else { None };
-    let ui = if let Some(channel) = &channel {
-        octoscript_makepad::to_makepad_l0_ui_with_events(&prepared.tree, channel)
+    let ui = if let (Some(channel), Some(runtime)) = (&channel, &runtime) {
+        let restored = octoscript_makepad::l0::prepare_with_state(&card, &data, &bundle.join("kit"), runtime.store())?;
+        validate_resources(&restored.tree, bundle, asset_origin)?;
+        octoscript_makepad::to_makepad_l0_ui_with_events(&restored.tree, channel)
     } else { octoscript_makepad::design::to_makepad_ui(&prepared.tree)? };
     Ok(Self { source: format!("width:Fill height:Fill flow:Overlay {ui}"), runtime, channel,
-        card, data, kit: bundle.join("kit"), bundle: bundle.into(), asset_origin: asset_origin.into() })
+        card, data, kit: bundle.join("kit"), bundle: bundle.into(), asset_origin: asset_origin.into(),
+        state_path: storage.map(|(path, _)| path.to_path_buf()), state_limit: storage.map(|(_, limit)| limit).unwrap_or(0) })
     }
 
     pub fn needs_event_channel(&self) -> bool { self.runtime.is_some() }
@@ -57,6 +72,7 @@ impl CardSession {
     pub fn dispatch_notify(&mut self, event_id: &str, payload: &str) -> Result<Option<String>, String> {
         let Some(runtime) = &mut self.runtime else { return Ok(None) };
         if Some(event_id) != self.channel.as_deref() { return Ok(None); }
+        if payload.len() > 65_536 { return Err("Card event payload exceeds 64 KiB".into()); }
         let message: serde_json::Value = serde_json::from_str(payload).map_err(|e| format!("Card event payload: {e}"))?;
         let target = message.get("target").and_then(|v| v.as_str()).and_then(|v| v.strip_prefix("l0:"))
             .ok_or("Card event target is missing")?;
@@ -64,15 +80,64 @@ impl CardSession {
         let key = target.get("k").and_then(|v| v.as_str()).ok_or("Card event key is missing")?;
         let event = target.get("e").and_then(|v| v.as_str()).ok_or("Card event name is missing")?;
         let value = target.get("v").cloned();
+        let before = runtime.snapshot_bytes()?;
         let outcome = runtime.dispatch_native(octosense_app_runtime::NativeEvent::new(runtime.generation(), key, event, value))?;
         if !outcome.applied { return Ok(None); }
-        let prepared = octoscript_makepad::l0::prepare_with_state(&self.card, &self.data, &self.kit, runtime.store())?;
-        validate_resources(&prepared.tree, &self.bundle, &self.asset_origin)?;
-        let ui = octoscript_makepad::to_makepad_l0_ui_with_events(&prepared.tree, event_id);
-        let source = format!("width:Fill height:Fill flow:Overlay {ui}");
+        let updated = (|| {
+            let prepared = octoscript_makepad::l0::prepare_with_state(&self.card, &self.data, &self.kit, runtime.store())?;
+            validate_resources(&prepared.tree, &self.bundle, &self.asset_origin)?;
+            let ui = octoscript_makepad::to_makepad_l0_ui_with_events(&prepared.tree, event_id);
+            if let Some(path) = &self.state_path {
+                let bytes = runtime.snapshot_bytes()?;
+                if bytes.len() as u64 > self.state_limit { return Err("Card state exceeds the app's storage quota".into()); }
+                write_snapshot(path, &bytes)?;
+            }
+            Ok::<_, String>(format!("width:Fill height:Fill flow:Overlay {ui}"))
+        })();
+        let source = match updated {
+            Ok(source) => source,
+            Err(e) => { runtime.restore_snapshot(&before)?; return Err(e); }
+        };
         self.source = source.clone();
         Ok(Some(source))
     }
+}
+
+/// A stable filename independent of app-supplied path spelling.
+pub fn state_path(app_data_root: &Path, app_id: &str) -> std::path::PathBuf {
+    app_data_root.join(".host/card-state").join(format!("{}.json", blake3::hash(app_id.as_bytes()).to_hex()))
+}
+
+fn read_snapshot(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).map_err(|e| e.to_string())?.take(1_048_577)
+        .read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() > 1_048_576 { return Err("Card state snapshot exceeds 1 MiB".into()); }
+    if bytes.len() as u64 > limit { return Err("Card state exceeds the app's storage quota".into()); }
+    Ok(bytes)
+}
+
+fn write_snapshot(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path.parent().ok_or("Card state path has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let mut nonce = [0u8; 16];
+    rand_core::TryRngCore::try_fill_bytes(&mut rand_core::OsRng, &mut nonce).map_err(|e| e.to_string())?;
+    let temp = path.with_extension(format!("{}.tmp", nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp).map_err(|e| e.to_string())?;
+        file.write_all(bytes).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&temp, path).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        if let Err(e) = std::fs::File::open(parent).and_then(|dir| dir.sync_all()) {
+            // The replacement already happened; rolling back memory here
+            // would disagree with the file a restart can read.
+            eprintln!("Card state directory sync failed after replace: {e}");
+        }
+        Ok::<_, String>(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temp); }
+    result
 }
 
 fn validate_resources(tree: &octoscript_render::UiNode, bundle: &Path, asset_origin: &str) -> Result<(), String> {

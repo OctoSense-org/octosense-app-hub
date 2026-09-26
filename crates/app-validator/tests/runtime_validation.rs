@@ -40,6 +40,50 @@ fn simple_stateful_card_prepares_with_native_control() {
 }
 
 #[test]
+fn card_state_survives_restart_and_failed_save_keeps_old_ui() {
+    let mut f = Fixture::new();
+    fs::remove_dir_all(f.bundle.join("kit/native")).unwrap();
+    let template = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/l0-kit");
+    for name in ["_palette_dark.octoscript", "_palette_light.octoscript", "_derive_color.octoscript", "_derive.octoscript", "_kit.octoscript"] {
+        fs::copy(template.join(name), f.bundle.join("kit").join(name)).unwrap();
+    }
+    fs::write(f.bundle.join("page.card"), "theme light\nstate selected { shape: enum[off, on], initial: .off }\n\
+        event flip { selected: cycle(.off, .on) }\n\
+        view root Row(on_tap: flip) { TextBody(text: selected) }").unwrap();
+    f.manifest.capabilities.push("storage".into());
+    f.sign();
+    assert!(f.report(None).passed());
+    let path = octosense_app_validator::state_path(&f.root, &f.manifest.id);
+    let origin = "http://127.0.0.1:1/";
+    let payload = serde_json::json!({"target":"l0:{\"e\":\"flip\",\"k\":\"root\",\"v\":\"\"}"}).to_string();
+    let mut first = octosense_app_validator::CardSession::open_with_state(&f.bundle, origin, Some((&path, 1_048_576))).unwrap();
+    let old_channel = first.event_channel().unwrap().to_string();
+    assert!(first.dispatch_notify(&old_channel, &payload).unwrap().unwrap().contains("on"));
+    assert!(path.is_file());
+    let mut restarted = octosense_app_validator::CardSession::open_with_state(&f.bundle, origin, Some((&path, 1_048_576))).unwrap();
+    assert!(restarted.source.contains("on"));
+    assert!(restarted.dispatch_notify(&old_channel, &payload).unwrap().is_none());
+    let new_channel = restarted.event_channel().unwrap().to_string();
+    assert!(restarted.dispatch_notify(&new_channel, &payload).unwrap().unwrap().contains("off"));
+    let no_storage = octosense_app_validator::CardSession::open(&f.bundle, origin).unwrap();
+    assert!(no_storage.source.contains("off"));
+
+    let blocking_file = f.root.join("not-a-directory");
+    fs::write(&blocking_file, "blocked").unwrap();
+    let blocked = blocking_file.join("state.json");
+    let mut cannot_save = octosense_app_validator::CardSession::open_with_state(&f.bundle, origin, Some((&blocked, 1_048_576))).unwrap();
+    let channel = cannot_save.event_channel().unwrap().to_string();
+    assert!(cannot_save.dispatch_notify(&channel, &payload).is_err());
+    assert!(cannot_save.source.contains("off"));
+    let limited_path = f.root.join("tiny-quota.json");
+    let mut limited = octosense_app_validator::CardSession::open_with_state(&f.bundle, origin, Some((&limited_path, 1))).unwrap();
+    let channel = limited.event_channel().unwrap().to_string();
+    assert!(limited.dispatch_notify(&channel, &payload).unwrap_err().contains("quota"));
+    assert!(limited.source.contains("off"));
+    assert!(!limited_path.exists());
+}
+
+#[test]
 fn script_bundle_prepares_without_a_card() {
     let mut f = Fixture::new();
     fs::remove_file(f.bundle.join("page.card")).unwrap();

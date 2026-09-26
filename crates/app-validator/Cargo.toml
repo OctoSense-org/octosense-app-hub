@@ -11,9 +11,9 @@ octosense-app-hub = { path = "../app-hub" }
 octosense-app-policy = { path = "../app-policy", features = ["splash"] }
 octosense-app-runtime = { path = "../app-runtime" }
 makepad-widgets = { git = "https://github.com/OctoSense-org/makepad.git", rev = "7786bb4a32d3282197699eefd2f2e9defbcf2d53" }
-octoscript-makepad = { git = "https://github.com/OctoSense-org/Octoscript-Makepad.git", rev = "4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2" }
-octoscript-render = { git = "https://github.com/OctoSense-org/Octoscript-Makepad.git", rev = "4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2" }
-octoscript-widgets = { git = "https://github.com/OctoSense-org/Octoscript-Makepad.git", rev = "4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2" }
+octoscript-makepad = { git = "https://github.com/OctoSense-org/Octoscript-Makepad.git", rev = "4fe5cc50b828a6dba10cc003b7e3b055a23b83b1" }
+octoscript-render = { git = "https://github.com/OctoSense-org/Octoscript-Makepad.git", rev = "4fe5cc50b828a6dba10cc003b7e3b055a23b83b1" }
+octoscript-widgets = { git = "https://github.com/OctoSense-org/Octoscript-Makepad.git", rev = "4fe5cc50b828a6dba10cc003b7e3b055a23b83b1" }
 serde_json = "1"
 blake3 = "1"
 rand_core = { version = "0.9", features = ["os_rng"] }

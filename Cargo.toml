@@ -36,6 +36,3 @@ makepad-strict-json = { path = "../makepad/libs/strict_json" }
 makepad-studio-protocol = { path = "../makepad/platform/studio" }
 makepad-network = { path = "../makepad/platform/network" }
 makepad-wm-theme = { path = "../makepad/libs/wm_theme" }
-
-[patch."https://github.com/OctoSense-org/Octoscript.git"]
-octoscript-ui-l0 = { path = "../octoscript/crates/octoscript-ui-l0" }

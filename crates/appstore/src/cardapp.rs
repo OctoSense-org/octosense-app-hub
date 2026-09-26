@@ -137,7 +137,9 @@ impl CardAppView {
         settings.hosts.push(server.allowlist_entry());
         let origin = server.origin().to_string();
         self.asset_server = Some(server);
-        let session = match octosense_app_validator::CardSession::open(bundle, &origin) {
+        let state = policy.allows("storage").then(|| octosense_app_validator::state_path(&root, &policy.app_id));
+        let storage = state.as_deref().map(|path| (path, policy.storage_bytes));
+        let session = match octosense_app_validator::CardSession::open_with_state(bundle, &origin, storage) {
             Ok(session) => session,
             Err(e) => return self.refuse(cx, &format!("The app did not open: {e}")),
         };
@@ -192,7 +194,11 @@ impl Widget for CardAppView {
                     let changed = self.session.as_mut().map(|session| session.dispatch_notify(&event_id, &payload));
                     match changed {
                         Some(Ok(Some(source))) => card.set_text(cx, &source),
-                        Some(Err(e)) => { self.refuse(cx, &format!("The Card event failed: {e}")); break; }
+                        Some(Err(e)) => {
+                            error!("card: event refused: {e}");
+                            self.view.label(cx, ids!(notice)).set_text(cx, &format!("Could not save the change: {e}"));
+                            break;
+                        }
                         _ => {}
                     }
                 }
