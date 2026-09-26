@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "sequence": 23,
+  "published": "2026-09-25",
+  "entries": [
+    {
+      "manifest": {
+        "schema": 1,
+        "id": "golden",
+        "version": "legacy-label",
+        "name": "Golden",
+        "integrity": {
+          "bundle_blake3": "0000000000000000000000000000000000000000000000000000000000000000",
+          "signature": {
+            "key_id": "golden-author",
+            "value": "b07ce7dc135d6297d4b0ee18d2adbb2a30043b76d8c0902b854299e63f99d63141a62916c5343efbe079bdec527f7a6512f96d736532d87690cfeab709fba506"
+          }
+        },
+        "capabilities": [],
+        "network": {
+          "hosts": []
+        },
+        "storage": {
+          "max_bytes": null
+        },
+        "compute": {
+          "instruction_budget": null,
+          "memory_bytes": null
+        },
+        "agent": null
+      },
+      "listing": null,
+      "artifact": "artifacts/golden.bundle",
+      "publisher": "golden-author",
+      "publisher_key": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1",
+      "source": {
+        "repository": "https://example.test/golden",
+        "commit": "abc"
+      },
+      "status": {
+        "state": "offered"
+      },
+      "admitted": "2026-09-25"
+    }
+  ],
+  "signature": "913fc4aa15a120994b2b8f9716d0f76ec33dcf273c9cf4c907159092d4ae764a5812c2cb61d75cf1db7b0e4905aac4f6e995b810c0fc14ad1127a4410deb930d",
+  "key": {
+    "public": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+    "anchor_certificate": "fb7e0047ad2e917febc064ab715e1d2d6cfdfed33185fb853189b80030404b8c3f94892a50868c05006daf03419e8f99dc29a63c98611ba69b1a1c123b91dc0c"
+  }
+}

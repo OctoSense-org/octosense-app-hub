@@ -192,7 +192,7 @@ impl AppStoreView {
         // overrides it for development.
         self.app_data_root = data_root(cx);
         let anchor = std::env::var("OCTOSENSE_HUB_ANCHOR").unwrap_or_else(|_| DEFAULT_ANCHOR.to_string());
-        let mut store = Store::new(&anchor, &self.app_data_root, HostLimits::default());
+        let mut store = Store::with_runtime(&anchor, &self.app_data_root, HostLimits::default(), octosense_app_policy::compatibility::RuntimeDescriptor::current(), source::configured_format());
 
         // A hub override on disk (`<data dir>/hub.txt`, a path or a base URL)
         // wins over the built-in hub: how a device with no route to the
@@ -206,7 +206,7 @@ impl AppStoreView {
         self.origin = match override_value {
             Some(value) => Some(source::Origin::parse(&value)),
             None => source::Origin::from_env(),
-        };
+        }.map(|origin| origin.for_format(store.format()));
         match &self.origin {
             None => self.status = "No hub configured. Set OCTOSENSE_HUB to a hub mirror.".into(),
             Some(origin) => match origin.catalog().and_then(|json| store.accept_catalog(&json)) {
@@ -216,7 +216,7 @@ impl AppStoreView {
                     // its version is offered and not withdrawn.
                     if let Ok(json) = origin.catalog() {
                         let _ = std::fs::create_dir_all(&self.app_data_root);
-                        let _ = std::fs::write(self.app_data_root.join("catalog.json"), json);
+                        let _ = std::fs::write(self.app_data_root.join(store.format().cache_filename()), json);
                     }
                     let count = store.catalog().map(|c| c.entries.len()).unwrap_or(0);
                     let today = octosense_app_hub::today();
@@ -390,8 +390,8 @@ impl AppStoreView {
         let app_id = &policy.app_id;
         let anchor = std::env::var("OCTOSENSE_HUB_ANCHOR").unwrap_or_else(|_| DEFAULT_ANCHOR.to_string());
         let current = (|| {
-            let mut store = Store::new(&anchor, &self.app_data_root, HostLimits::default());
-            store.accept_catalog(&std::fs::read_to_string(self.app_data_root.join("catalog.json")).map_err(|e| e.to_string())?)?;
+            let mut store = Store::with_runtime(&anchor, &self.app_data_root, HostLimits::default(), octosense_app_policy::compatibility::RuntimeDescriptor::current(), source::configured_format());
+            store.accept_catalog(&std::fs::read_to_string(self.app_data_root.join(store.format().cache_filename())).map_err(|e| e.to_string())?)?;
             store.validate_prepared_launch(&prepared)
         })();
         if let Err(e) = current { self.status = format!("Cannot open: {e}"); return self.refresh(cx); }
@@ -666,6 +666,7 @@ mod lifecycle_tests {
             view.all_listings = vec![Listing {
                 app_id: "example-app".into(), name: "Example".into(), version: "2.0.0".into(),
                 publisher: "Example".into(), permissions: vec![], privacy: vec![], about: None,
+                compatibility: octosense_app_policy::compatibility::CompatibilityResult { compatible: true, reasons: vec![] },
                 artifact: String::new(), availability: Availability::Installed { version: "1.0.0".into() },
                 lifecycle: AppAvailability {
                     installed_version: Some("1.0.0".into()), can_open: true,

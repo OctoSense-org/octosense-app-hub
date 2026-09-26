@@ -52,6 +52,7 @@ fn pill_source(id: &str, listing: &Listing) -> String {
         Availability::Installable => ("GET", BLUE),
         Availability::Installed { .. } => ("OPEN", BLUE),
         Availability::Withdrawn { .. } => ("WITHDRAWN", "#ff3b30"),
+        Availability::Unavailable { .. } => ("UNAVAILABLE", "#ff3b30"),
     };
     format!(
         r#"{id} := Button {{ text: "{text}" draw_text.color: {colour} draw_text.text_style.font_size: 12 draw_bg.color: {PILL} draw_bg.color_hover: #e0e0e6 draw_bg.color_down: #d6d6dc draw_bg.radius: 14 draw_bg.border_width: 0 padding: Inset{{left: 18., right: 18., top: 6., bottom: 6.}} }}"#
@@ -202,6 +203,7 @@ pub fn detail_source(listing: &Listing, status: &str, asset_base: Option<&str>) 
     };
 
     let note = match &listing.availability {
+        Availability::Unavailable { reason } => label(reason, "#ff3b30", 12, true, "8"),
         Availability::Withdrawn { reason } => label(&format!("This app was withdrawn: {reason}"), "#ff3b30", 12, true, "8"),
         _ => String::new(),
     };

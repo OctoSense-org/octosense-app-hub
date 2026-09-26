@@ -12,10 +12,10 @@ Goal: implement the reviewed App Hub roadmap in dependency order, prioritizing f
 7. Validate issue coverage, file paths, plan dependencies and acceptance gates — complete.
 
 8. Implement and verify publisher key continuity (plan 01) — verified locally.
-9. Implement and verify installed-version launch (plan 02) — verified locally.
-10. Implement runnable bundle admission (plan 03) — verified locally with coordinated consumer pin.
-11. Implement catalog release operations (plan 04) — verified locally; consumer pin checkpoint in progress.
-12. Implement runtime compatibility (plan 05) — next.
+9. Implement and verify installed-version launch (plan 02) — Hub and shared shell code verified locally; refreshed Home consumer pin remains to coordinate.
+10. Implement runnable bundle admission (plan 03) — Hub and native validator verified locally, including script apps after the upstream refresh.
+11. Implement catalog release operations (plan 04) — Hub code verified locally; deployment remains unactivated.
+12. Implement runtime compatibility (plan 05) — Hub and shared shell code verified locally: v1/v2 signing fixtures, compatibility selection/reasons, separate reader caches and operator v2 publication. Active Home pin and native device validation remain.
 13. Continue remaining plans in dependency order — pending.
 
 Implementation worktree: `/Users/guofoo/git/octosense/app-hub-store-work`, branch `feat/app-store-foundations`.

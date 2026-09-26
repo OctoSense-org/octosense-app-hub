@@ -64,6 +64,7 @@ pub fn validate_native(bundle: &Path) -> Result<octosense_app_hub::runtime::Runt
     cx.with_vm(makepad_widgets::script_mod);
     widget_async::register_splash_isolate_mod(|vm| { octoscript_widgets::design::script_mod(vm); });
     widget_async::register_splash_isolate_mod(|vm| { octoscript_widgets::kit::script_mod(vm); });
+    widget_async::register_splash_isolate_mod(makepad_widgets::splash::register_agent_module);
     let root = cx.with_vm(|vm| {
         let value = script_eval!(vm, { use mod.widgets.* Splash {} });
         WidgetRef::script_from_value(vm, value)

@@ -30,8 +30,12 @@ impl CatalogPublishers {
     /// `catalog` must already be authenticated by the caller. Check *all*
     /// entries, including withdrawals, rather than letting order pick a key.
     pub fn from_catalog(catalog: &Catalog) -> Result<Self, String> {
+        Self::from_catalogs(&[catalog])
+    }
+
+    pub fn from_catalogs(catalogs: &[&Catalog]) -> Result<Self, String> {
         let mut registry = Self::default();
-        for entry in &catalog.entries {
+        for entry in catalogs.iter().flat_map(|catalog| &catalog.entries) {
             let signature = entry.manifest.integrity.signature.as_ref()
                 .ok_or("legacy unsigned publisher binding requires operator reconciliation")?;
             if signature.key_id != entry.publisher || entry.publisher.is_empty() {

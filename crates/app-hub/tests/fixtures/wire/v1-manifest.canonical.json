@@ -1,0 +1,1 @@
+{"agent":null,"capabilities":[],"compute":{"instruction_budget":null,"memory_bytes":null},"id":"golden","integrity":{"bundle_blake3":"0000000000000000000000000000000000000000000000000000000000000000","signature":null},"name":"Golden","network":{"hosts":[]},"schema":1,"storage":{"max_bytes":null},"version":"legacy-label"}

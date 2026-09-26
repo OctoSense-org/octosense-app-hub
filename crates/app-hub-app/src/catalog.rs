@@ -1,6 +1,6 @@
 //! Verified live catalog and a deliberately separate built-in app preview.
 
-use octosense_app_hub::{AppAvailability, Availability, Listing, Store};
+use octosense_app_hub::{CatalogFormat, AppAvailability, Availability, Listing, Store};
 use octosense_app_policy::HostLimits;
 use octosense_appstore::source::Origin;
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock, TryLockError};
 static CATALOG_IO: Mutex<()> = Mutex::new(());
 // A verified withdrawal must remain a sequence floor even if the disk cannot
 // persist it. Share the floor with existing and future workers for this root.
-type CatalogFloors = BTreeMap<(PathBuf, String), u64>;
+type CatalogFloors = BTreeMap<(PathBuf, String, CatalogFormat), u64>;
 static VERIFIED_SEQUENCES: OnceLock<Mutex<CatalogFloors>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,13 +119,14 @@ pub struct LaunchApproval {
     root_key: PathBuf,
     anchor: String,
     sequence: u64,
+    format: CatalogFormat,
 }
 
 impl LaunchApproval {
     pub fn still_current(&self) -> Result<(), String> {
         let floors = VERIFIED_SEQUENCES.get_or_init(|| Mutex::new(BTreeMap::new()))
             .lock().unwrap_or_else(|p| p.into_inner());
-        if floors.get(&(self.root_key.clone(), self.anchor.clone())).is_some_and(|floor| *floor != self.sequence) {
+        if floors.get(&(self.root_key.clone(), self.anchor.clone(), self.format)).is_some_and(|floor| *floor != self.sequence) {
             Err("App Hub changed while opening this app. Try again.".into())
         } else { Ok(()) }
     }
@@ -139,10 +140,11 @@ pub fn prepare_launch_from_environment(root: PathBuf, id: &str) -> Result<Launch
 pub fn card_catalog_guard(root: &Path) -> Box<dyn Fn(u64) -> Result<(), String>> {
     let root_key = root_identity(root);
     let (_, anchor) = environment_settings();
+    let format = octosense_appstore::source::configured_format();
     Box::new(move |sequence| {
         let floors = VERIFIED_SEQUENCES.get_or_init(|| Mutex::new(BTreeMap::new()))
             .lock().unwrap_or_else(|p| p.into_inner());
-        if floors.get(&(root_key.clone(), anchor.clone())).is_some_and(|floor| sequence < *floor) {
+        if floors.get(&(root_key.clone(), anchor.clone(), format)).is_some_and(|floor| sequence < *floor) {
             Err("A newer App Hub catalog was verified but could not be saved. Refresh App Hub before opening.".into())
         } else { Ok(()) }
     })
@@ -160,7 +162,7 @@ fn prepare_launch(root: PathBuf, origin: Origin, anchor: String, id: &str) -> Re
 fn prepare_launch_unlocked(root: PathBuf, origin: Origin, anchor: String, id: &str) -> Result<LaunchApproval, String> {
     let backend = Backend::new_unlocked(root, origin, anchor);
     backend.may_open(id)?;
-    Ok(LaunchApproval { root_key: backend.root_key, anchor: backend.anchor, sequence: backend.store.catalog().unwrap().sequence })
+    Ok(LaunchApproval { root_key: backend.root_key, anchor: backend.anchor, sequence: backend.store.catalog().unwrap().sequence, format: backend.store.format() })
 }
 
 fn try_may_open(root: PathBuf, origin: Origin, anchor: String, id: &str) -> Result<(), String> {
@@ -185,6 +187,11 @@ fn environment_settings() -> (Origin, String) {
 }
 
 impl Backend {
+    pub fn new_with_format(root: PathBuf, origin: Origin, anchor: String, format: CatalogFormat) -> Self {
+        let _guard = CATALOG_IO.lock().unwrap_or_else(|p| p.into_inner());
+        Self::new_format_unlocked(root, origin, anchor, format)
+    }
+
     pub fn new(root: PathBuf, origin: Origin, anchor: String) -> Self {
         let _guard = CATALOG_IO.lock().unwrap_or_else(|p| p.into_inner());
         Self::new_unlocked(root, origin, anchor)
@@ -193,7 +200,12 @@ impl Backend {
     // Caller holds CATALOG_IO. This reads local state and performs recovery;
     // neither constructor nor the shell launch gate contacts the origin.
     fn new_unlocked(root: PathBuf, origin: Origin, anchor: String) -> Self {
-        let store = Store::new(&anchor, &root, HostLimits::default());
+        Self::new_format_unlocked(root, origin, anchor, octosense_appstore::source::configured_format())
+    }
+
+    fn new_format_unlocked(root: PathBuf, origin: Origin, anchor: String, format: CatalogFormat) -> Self {
+        let origin = origin.for_format(format);
+        let store = Store::with_runtime(&anchor, &root, HostLimits::default(), octosense_app_policy::compatibility::RuntimeDescriptor::current(), format);
         let recovery_warning = recover_installations(&root).err();
         let mut backend = Self {
             root_key: root_identity(&root),
@@ -222,7 +234,7 @@ impl Backend {
     }
 
     fn load_cache(&mut self) {
-        match std::fs::read_to_string(self.root.join("catalog.json")) {
+        match std::fs::read_to_string(self.root.join(self.store.format().cache_filename())) {
             Ok(json) => {
                 if let Err(error) = self
                     .store
@@ -249,7 +261,7 @@ impl Backend {
         // including when another Hub instance refreshed since this worker did.
         self.load_cache();
         match self.origin.catalog().and_then(|json| {
-            let mut candidate = Store::new(&self.anchor, &self.root, HostLimits::default());
+            let mut candidate = Store::with_runtime(&self.anchor, &self.root, HostLimits::default(), self.store.runtime().clone(), self.store.format());
             if let Some(held) = self.store.catalog() {
                 candidate
                     .accept_catalog(&serde_json::to_string(held).map_err(|e| e.to_string())?)?;
@@ -257,7 +269,7 @@ impl Backend {
             candidate.accept_catalog(&json)?;
             self.remember_sequence(candidate.catalog().unwrap().sequence)?;
             self.revoked_releases = revoked_releases(&candidate);
-            if let Err(error) = persist_catalog(&self.root, &json) {
+            if let Err(error) = persist_catalog(&self.root, self.store.format(), &json) {
                 self.persistence_failed = true;
                 return Err(error);
             }
@@ -346,14 +358,14 @@ impl Backend {
                 Ok(_) => EntryStatus::Installed,
                 Err(error) => EntryStatus::Unavailable(error),
             },
-            Availability::Withdrawn { reason } => EntryStatus::Unavailable(reason),
+            Availability::Withdrawn { reason } | Availability::Unavailable { reason } => EntryStatus::Unavailable(reason),
         }};
         let consent = if can_install
             && matches!(
                 status,
                 EntryStatus::Available | EntryStatus::UpdateAvailable
             ) {
-            self.store.entry(&listing.app_id).and_then(|entry| {
+            self.store.install_candidate(&listing.app_id).ok().and_then(|entry| {
                 octosense_app_policy::policy::resolve(&entry.manifest, &HostLimits::default())
                     .ok()?;
                 Some(InstallConsent {
@@ -434,10 +446,10 @@ impl Backend {
             }
             // The Hub backend copies into its own root. Give it a staging root
             // so a failed copy cannot remove or expose a partial live bundle.
-            let mut prepared_store = Store::new(
+            let mut prepared_store = Store::with_runtime(
                 &self.anchor,
                 &workspace.join("verified"),
-                HostLimits::default(),
+                HostLimits::default(), self.store.runtime().clone(), self.store.format(),
             );
             prepared_store.accept_catalog(
                 &serde_json::to_string(self.store.catalog().unwrap()).map_err(|e| e.to_string())?,
@@ -467,8 +479,7 @@ impl Backend {
         }
         let entry = self
             .store
-            .entry(&consent.app_id)
-            .ok_or("This app is no longer offered by the Hub")?;
+            .install_candidate(&consent.app_id)?;
         if let octosense_app_hub::Status::Withdrawn(reason) = &entry.status {
             return Err(format!("This app was withdrawn: {reason}"));
         }
@@ -492,7 +503,7 @@ impl Backend {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let floor = floors
-            .entry((self.root_key.clone(), self.anchor.clone()))
+            .entry((self.root_key.clone(), self.anchor.clone(), self.store.format()))
             .or_insert(sequence);
         if sequence < *floor {
             return Err(format!("Refusing catalog {sequence}: a newer catalog ({floor}) was already verified. Retry until it can be saved."));
@@ -506,7 +517,7 @@ impl Backend {
             .get_or_init(|| Mutex::new(BTreeMap::new()))
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if let Some(floor) = floors.get(&(self.root_key.clone(), self.anchor.clone())) {
+        if let Some(floor) = floors.get(&(self.root_key.clone(), self.anchor.clone(), self.store.format())) {
             if self
                 .store
                 .catalog()
@@ -618,14 +629,14 @@ fn asset_location(origin: &Origin, artifact: &str, asset: &str) -> Option<String
     }
 }
 
-fn persist_catalog(root: &Path, json: &str) -> Result<(), String> {
+fn persist_catalog(root: &Path, format: CatalogFormat, json: &str) -> Result<(), String> {
     std::fs::create_dir_all(root).map_err(|e| format!("Could not create the app library: {e}"))?;
-    let temporary = root.join(".catalog.json.tmp");
+    let temporary = root.join(format!(".{}.tmp", format.cache_filename()));
     let result = (|| {
         let mut file = std::fs::File::create(&temporary).map_err(|e| e.to_string())?;
         file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
-        std::fs::rename(&temporary, root.join("catalog.json")).map_err(|e| e.to_string())
+        std::fs::rename(&temporary, root.join(format.cache_filename())).map_err(|e| e.to_string())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(temporary);
@@ -719,6 +730,38 @@ mod tests {
     use octosense_app_hub::{Catalog, HubKey, Source, Status};
     use octosense_app_policy::{AppManifest, MANIFEST_FILE};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn v2_client_uses_separate_catalog_cache_floor_and_reports_compatibility() {
+        let f = Fixture::new();
+        let legacy = f.entry();
+        f.publish_today(50, vec![legacy.clone()]);
+        assert!(f.backend().refresh().verified);
+        let mut entry = legacy;
+        let mut value = serde_json::to_value(&entry.manifest).unwrap();
+        value["schema"] = serde_json::json!(2);
+        value["version"] = serde_json::json!("2.0.0");
+        value["capabilities"] = serde_json::json!([]);
+        value["release_number"] = serde_json::json!(2);
+        value["runtime"] = serde_json::json!({"api":"1","min_build":99,"platforms":["macos"]});
+        value["requires"] = serde_json::json!(["card.ui@1"]);
+        value["entrypoints"] = serde_json::json!({"ui":"page.card"});
+        value["data_schema"] = serde_json::json!(1);
+        entry.manifest = AppManifest::parse(&value.to_string()).unwrap();
+        octosense_app_hub::sign_manifest(&f.publisher, &mut entry.manifest, "test-publisher").unwrap();
+        let mut catalog = Catalog::new(1, &octosense_app_hub::today(), vec![entry]); catalog.schema = 2;
+        f.working.sign_catalog(&mut catalog, &f.anchor.certify(&f.working.public_hex()).unwrap()).unwrap();
+        std::fs::create_dir(f.path.join("hub/v2")).unwrap();
+        std::fs::write(f.path.join("hub/v2/catalog.json"), serde_json::to_vec(&catalog).unwrap()).unwrap();
+        let mut backend = Backend::new_with_format(f.root(), Origin::Directory(f.path.join("hub")), f.anchor.public_hex(), CatalogFormat::V2);
+        let snapshot = backend.refresh();
+        assert!(snapshot.verified, "{:?}", snapshot.warning);
+        assert!(matches!(&snapshot.entries[0].status, EntryStatus::Unavailable(reason) if reason.contains("99")), "{:?}", snapshot.entries[0].status);
+        assert!(snapshot.entries[0].consent.is_none());
+        assert_eq!(backend.store.catalog().unwrap().sequence, 1);
+        assert!(f.root().join("catalog-v2.json").exists());
+        assert_eq!(f.backend().store.catalog().unwrap().sequence, 50);
+    }
 
     struct Fixture {
         path: PathBuf,
@@ -1146,7 +1189,7 @@ mod tests {
     fn failed_staging_copy_keeps_the_installed_bundle_and_app_data() {
         let f = Fixture::new();
         let mut backend = f.install_first_version();
-        f.publish_today(2, vec![f.update()]);
+        f.publish_today(2, vec![f.entry(), f.update()]);
         let consent = backend.refresh().entries[0].consent.clone().unwrap();
         let workspace = f.root().join(".app-hub-install");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -1302,7 +1345,7 @@ mod tests {
     fn successful_update_publishes_complete_bundle_and_preserves_data() {
         let f = Fixture::new();
         let mut backend = f.install_first_version();
-        f.publish_today(2, vec![f.update()]);
+        f.publish_today(2, vec![f.entry(), f.update()]);
         let consent = backend.refresh().entries[0].consent.clone().unwrap();
         backend.install(&consent).unwrap();
         let app_root = f.root().join("test-app");

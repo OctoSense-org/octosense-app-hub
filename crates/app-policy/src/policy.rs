@@ -107,6 +107,7 @@ impl AppPolicy {
 
 /// Resolve a parsed manifest against this host.
 pub fn resolve(manifest: &AppManifest, limits: &HostLimits) -> Result<AppPolicy, String> {
+    manifest.validate_schema()?;
     check_id(&manifest.id)?;
     if manifest.version.trim().is_empty() {
         return Err("manifest version is empty".into());

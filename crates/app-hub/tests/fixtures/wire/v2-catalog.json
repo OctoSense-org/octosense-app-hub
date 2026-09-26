@@ -1,0 +1,68 @@
+{
+  "schema": 2,
+  "sequence": 23,
+  "published": "2026-09-25",
+  "entries": [
+    {
+      "manifest": {
+        "schema": 2,
+        "id": "golden",
+        "version": "1.2.0",
+        "name": "Golden",
+        "integrity": {
+          "bundle_blake3": "0000000000000000000000000000000000000000000000000000000000000000",
+          "signature": {
+            "key_id": "golden-author",
+            "value": "fad80d9a95cbaa5887ba157c528aa6ef2d7377ccb94b7771954d9578cc9b4108a0008cd8ea4066401f10a347342c062da21b3ccd173d28c8e07d55a19e1af10e"
+          }
+        },
+        "capabilities": [],
+        "network": {
+          "hosts": []
+        },
+        "storage": {
+          "max_bytes": null
+        },
+        "compute": {
+          "instruction_budget": null,
+          "memory_bytes": null
+        },
+        "agent": null,
+        "release_number": 12,
+        "runtime": {
+          "api": "1",
+          "min_build": 1,
+          "platforms": [
+            "macos",
+            "android"
+          ]
+        },
+        "requires": [
+          "card.ui@1"
+        ],
+        "entrypoints": {
+          "ui": "page.card",
+          "logic": null
+        },
+        "data_schema": 1
+      },
+      "listing": null,
+      "artifact": "artifacts/golden.bundle",
+      "publisher": "golden-author",
+      "publisher_key": "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1",
+      "source": {
+        "repository": "https://example.test/golden",
+        "commit": "abc"
+      },
+      "status": {
+        "state": "offered"
+      },
+      "admitted": "2026-09-25"
+    }
+  ],
+  "signature": "0ad5306bb647efa12182dba74ab2b8d431c67e884e8ceda2e621c66463122eb6dafe4bbc0dd55979b0ef66096a2489c9ee9639702ac90596ea22409134ddcd0b",
+  "key": {
+    "public": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+    "anchor_certificate": "fb7e0047ad2e917febc064ab715e1d2d6cfdfed33185fb853189b80030404b8c3f94892a50868c05006daf03419e8f99dc29a63c98611ba69b1a1c123b91dc0c"
+  }
+}

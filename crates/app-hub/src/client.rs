@@ -5,10 +5,12 @@
 //! catalog. An entry that is withdrawn is not installable, and if it is
 //! already installed it is not runnable. A bundle whose bytes do not match
 //! the entry never reaches a jail.
-use crate::index::{Catalog, Entry};
+use crate::index::{Catalog, CatalogFormat, Entry};
+use octosense_app_policy::compatibility::{self, CompatibilityResult, RuntimeDescriptor};
 use crate::signing::{verify_catalog, PublisherKeys};
 use octosense_app_policy::{digest_dir, AppPolicy, HostLimits, SignatureVerifier};
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 /// How stale a cached catalog may be before installs stop. Running apps are
 /// unaffected: the point is that a device kept offline cannot become a place
@@ -47,6 +49,8 @@ pub struct Store {
     app_data_root: PathBuf,
     limits: HostLimits,
     catalog: Option<Catalog>,
+    runtime: RuntimeDescriptor,
+    format: CatalogFormat,
 }
 
 pub struct PreparedLaunch {
@@ -62,6 +66,7 @@ impl PreparedLaunch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Availability {
     Installable,
+    Unavailable { reason: String },
     Installed { version: String },
     /// Installed, but the catalog no longer offers this version.
     Withdrawn { reason: String },
@@ -95,11 +100,17 @@ pub struct Listing {
     pub artifact: String,
     pub availability: Availability,
     pub lifecycle: AppAvailability,
+    pub compatibility: CompatibilityResult,
 }
 
 impl Store {
     pub fn new(anchor_public_hex: &str, app_data_root: &Path, limits: HostLimits) -> Self {
+        Self::with_runtime(anchor_public_hex, app_data_root, limits, RuntimeDescriptor::current(), CatalogFormat::V1)
+    }
+
+    pub fn with_runtime(anchor_public_hex: &str, app_data_root: &Path, limits: HostLimits, runtime: RuntimeDescriptor, format: CatalogFormat) -> Self {
         Store {
+            runtime, format,
             anchor_public_hex: anchor_public_hex.to_string(),
             app_data_root: app_data_root.to_path_buf(),
             limits,
@@ -112,8 +123,8 @@ impl Store {
     /// app that was pulled.
     pub fn accept_catalog(&mut self, json: &str) -> Result<(), String> {
         let catalog: Catalog = serde_json::from_str(json).map_err(|e| format!("catalog is not valid: {e}"))?;
-        if catalog.schema != crate::index::CATALOG_SCHEMA {
-            return Err(format!("catalog schema {} is not {}", catalog.schema, crate::index::CATALOG_SCHEMA));
+        if catalog.schema != self.format.schema() {
+            return Err(format!("catalog schema {} is not {}", catalog.schema, self.format.schema()));
         }
         verify_catalog(&catalog, &self.anchor_public_hex)?;
         if let Some(held) = &self.catalog {
@@ -127,6 +138,9 @@ impl Store {
         self.catalog = Some(catalog);
         Ok(())
     }
+
+    pub fn runtime(&self) -> &RuntimeDescriptor { &self.runtime }
+    pub fn format(&self) -> CatalogFormat { self.format }
 
     pub fn catalog(&self) -> Option<&Catalog> {
         self.catalog.as_ref()
@@ -155,16 +169,18 @@ impl Store {
     pub fn listings(&self) -> Vec<Listing> {
         let Some(catalog) = &self.catalog else { return Vec::new() };
         let mut out: Vec<Listing> = Vec::new();
+        let mut seen = HashSet::new();
         // Newest entry per app: the catalog appends, so walk it backwards.
-        for entry in catalog.entries.iter().rev() {
-            if out.iter().any(|l| l.app_id == entry.app_id()) {
-                continue;
-            }
+        for candidate in catalog.entries.iter().rev() {
+            if !seen.insert(candidate.app_id()) { continue; }
+            let entry = self.entry(candidate.app_id()).expect("entry is in held catalog");
             let lifecycle = self.app_availability(entry.app_id());
+            let compatibility = compatibility::evaluate(&entry.manifest, &self.runtime);
             let availability = match (&lifecycle.installed_version, lifecycle.can_open, &entry.status) {
                 (Some(version), true, _) => Availability::Installed { version: version.clone() },
                 (Some(_), false, _) => Availability::Withdrawn { reason: lifecycle.unavailable_reason.clone().unwrap_or_default() },
                 (None, _, crate::index::Status::Withdrawn(reason)) => Availability::Withdrawn { reason: reason.clone() },
+                (None, _, _) if !compatibility.compatible => Availability::Unavailable { reason: compatibility.require().unwrap_err() },
                 (None, _, _) => Availability::Installable,
             };
             out.push(Listing {
@@ -178,6 +194,7 @@ impl Store {
                 artifact: entry.artifact.clone(),
                 availability,
                 lifecycle,
+                compatibility,
             });
         }
         out
@@ -220,7 +237,41 @@ impl Store {
     /// The newest entry for an app: the install/update candidate. Launch
     /// checks must use `release` for the exact installed version instead.
     pub fn entry(&self, app_id: &str) -> Option<&Entry> {
-        self.catalog.as_ref()?.entries.iter().rev().find(|e| e.app_id() == app_id)
+        let entries = &self.catalog.as_ref()?.entries;
+        let order = |index: usize, entry: &Entry| entry.manifest.contract().map(|c| (2, c.release_number)).unwrap_or((1, index as u64));
+        let candidates = || entries.iter().enumerate().filter(|(_, e)| e.app_id() == app_id);
+        candidates().filter(|(_, e)| e.status.is_offered() && compatibility::evaluate(&e.manifest, &self.runtime).compatible)
+            .max_by_key(|(i, e)| order(*i, e))
+            .or_else(|| candidates().max_by_key(|(i, e)| order(*i, e)))
+            .map(|(_, entry)| entry)
+    }
+
+    /// Resolve eligibility before fetching/staging. Never select an implicit
+    /// downgrade when an installed release has a higher authenticated order.
+    pub fn install_candidate(&self, app_id: &str) -> Result<&Entry, String> {
+        if app_id.starts_with("os.") {
+            return Err(format!("{app_id} names a system app, which no store may install"));
+        }
+        let entry = self.entry(app_id).ok_or_else(|| format!("{app_id} is not in the catalog"))?;
+        if let crate::Status::Withdrawn(reason) = &entry.status { return Err(format!("{app_id} has been withdrawn: {reason}")); }
+        compatibility::evaluate(&entry.manifest, &self.runtime).require()?;
+        if let Some(version) = self.installed_version(app_id) {
+            if version != entry.version() {
+                let installed = self.release(app_id, &version)?;
+                let newer = match (entry.manifest.contract(), installed.manifest.contract()) {
+                    (Some(next), Some(old)) => next.release_number > old.release_number,
+                    (None, Some(_)) => false,
+                    (Some(_), None) => true,
+                    (None, None) => {
+                        let entries = &self.catalog.as_ref().unwrap().entries;
+                        let position = |version: &str| entries.iter().position(|e| e.app_id() == app_id && e.version() == version).unwrap();
+                        position(entry.version()) > position(&version)
+                    }
+                };
+                if !newer { return Err("A newer release is installed; automatic downgrade is not permitted".into()); }
+            }
+        }
+        Ok(entry)
     }
 
     pub fn release(&self, app_id: &str, version: &str) -> Result<&Entry, String> {
@@ -237,7 +288,7 @@ impl Store {
     pub fn app_availability(&self, app_id: &str) -> AppAvailability {
         let installed_version = self.installed_version(app_id);
         let launch = installed_version.as_ref().map(|_| self.may_run(app_id));
-        let update_version = self.entry(app_id)
+        let update_version = self.install_candidate(app_id).ok()
             .filter(|e| e.status.is_offered() && installed_version.as_deref().is_some_and(|v| v != e.version()))
             .map(|e| e.version().to_string());
         AppAvailability {
@@ -273,12 +324,7 @@ impl Store {
         today: &str,
     ) -> Result<AppPolicy, String> {
         self.installs_allowed(today)?;
-        // System apps ship with the build; a download may never take one's id,
-        // and with it that app's jail.
-        if app_id.starts_with("os.") {
-            return Err(format!("{app_id} names a system app, which no store may install"));
-        }
-        let entry = self.entry(app_id).ok_or_else(|| format!("{app_id} is not in the catalog"))?;
+        let entry = self.install_candidate(app_id)?;
         if let crate::index::Status::Withdrawn(reason) = &entry.status {
             return Err(format!("{app_id} has been withdrawn: {reason}"));
         }
@@ -337,6 +383,7 @@ impl Store {
     }
 
     fn verify_release_bundle(&self, entry: &Entry, bundle: &Path) -> Result<AppPolicy, String> {
+        compatibility::evaluate(&entry.manifest, &self.runtime).require()?;
         if let crate::index::Status::Withdrawn(reason) = &entry.status {
             return Err(format!("{} {} was withdrawn: {reason}", entry.app_id(), entry.version()));
         }
@@ -363,6 +410,7 @@ impl Store {
     /// loading code. The prepared instance continues to own its checked bytes.
     pub fn validate_prepared_launch(&self, prepared: &PreparedLaunch) -> Result<(), String> {
         let entry = self.release(&prepared.manifest.id, &prepared.manifest.version)?;
+        compatibility::evaluate(&entry.manifest, &self.runtime).require()?;
         if let crate::index::Status::Withdrawn(reason) = &entry.status {
             return Err(format!("{} {} was withdrawn: {reason}", entry.app_id(), entry.version()));
         }

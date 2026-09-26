@@ -43,3 +43,10 @@
 ## Release automation references — 2026-09-25
 
 - GitHub primary documentation: scheduled workflows run from the default branch and can be delayed; concurrency limits overlapping runs but does not replace the filesystem transaction lock. Use protected operator runners with no submission checkout; external monitoring is needed to notice a scheduler/runner that never starts. Sources: https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule and https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency .
+
+## Refreshed repository topology — 2026-09-26
+
+- App Hub upstream now owns the shared `crates/app-hub-app` shell UI, `main.splash` script apps, first-party system-app registration and host-service sheets. OctoSense-mobile is archived; active consumer integration belongs in OctoSense-rom/Home and its System Apps Mail dependency.
+- Home currently pins Hub 0d36f50 in two Cargo sections; System Apps Mail service pins the same revision. Pin updates must keep that dependency graph coherent.
+- The prior Card-only admission code rejected valid upstream script apps; the validator also lacked the `sys` vocabulary that both runtime hosts registered. Both defects were reproduced with native test fixtures and fixed on the merged branch.
+- Plan 05's v2 reader default must remain opt-in until the `v2/catalog.json` endpoint contains every approved installed v1 release needed by upgraded clients. V2 release state and artifacts live in separate domains; a client cannot treat a v1 signature as v2 semantics.

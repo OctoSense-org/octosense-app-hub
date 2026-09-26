@@ -491,6 +491,9 @@ impl AppHubView {
                 }
             }
             self.rows.push(Row::Detail(entry.clone()));
+            if let EntryStatus::Unavailable(reason) = &entry.status {
+                self.rows.push(Row::Notice(reason.clone()));
+            }
             if self.confirming {
                 self.rows.push(Row::Consent(entry));
             } else {
@@ -1200,6 +1203,15 @@ mod tests {
             assert!(view.rows.iter().any(|row| matches!(row, Row::Detail(_))));
             assert!(view.back(&mut cx));
             assert!(view.selected.is_none());
+            let mut incompatible = catalog::preview_entries().remove(0);
+            incompatible.kind = CatalogKind::Live;
+            incompatible.status = EntryStatus::Unavailable("Requires runtime build 99 or newer".into());
+            view.selected = Some(incompatible);
+            view.notice.clear();
+            view.render(&mut cx);
+            assert!(view.rows.iter().any(|row| matches!(row, Row::Notice(reason) if reason.contains("build 99"))),
+                "the detail screen must tell people why an app cannot install");
+            view.selected = None;
             view.preview = false;
             view.page = Page::Library;
             view.render(&mut cx);

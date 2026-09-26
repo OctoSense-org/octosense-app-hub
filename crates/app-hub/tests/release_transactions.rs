@@ -99,6 +99,141 @@ fn publication_requires_a_recorded_operator_review() {
 }
 
 #[test]
+fn operator_can_publish_v2_beside_an_unchanged_v1_catalog() {
+    let mut f = Fixture::new();
+    let mut value = serde_json::to_value(&f.manifest).unwrap();
+    value["schema"] = serde_json::json!(2);
+    value["release_number"] = serde_json::json!(1);
+    value["runtime"] = serde_json::json!({"api":"1","min_build":1,"platforms":[std::env::consts::OS]});
+    value["requires"] = serde_json::json!(["card.ui@1"]);
+    value["entrypoints"] = serde_json::json!({"ui":"page.card"});
+    value["data_schema"] = serde_json::json!(1);
+    f.manifest = octosense_app_policy::AppManifest::parse(&value.to_string()).unwrap();
+    f.sign();
+    let anchor = HubKey::generate();
+    let working = HubKey::generate();
+    let key = f.root.join("working.key");
+    fs::write(&key, hex::encode(working.to_bytes())).unwrap();
+    let mut legacy = Catalog::new(50, &today(), vec![]);
+    working.sign_catalog(&mut legacy, &anchor.certify(&working.public_hex()).unwrap()).unwrap();
+    let legacy_path = f.root.join("public/catalog.json");
+    write_catalog(&legacy_path, &legacy);
+    fs::create_dir_all(f.root.join("public/v2")).unwrap();
+    let v2_path = f.root.join("public/v2/catalog.json");
+    let worker = f.protocol_worker();
+    let output = Command::new(env!("CARGO_BIN_EXE_hub")).args([
+        "admin", "publish", f.bundle.to_str().unwrap(), "--catalog", v2_path.to_str().unwrap(),
+        "--catalog-schema", "2", "--state-dir", f.root.join("v2-state").to_str().unwrap(),
+        "--expected-sequence", "0", "--idempotency-key", "v2-release-one",
+        "--publisher", "publisher-one", "--publisher-key", &format!("publisher-one={}", f.publisher.public_hex()),
+        "--reviewed-by", "operator", "--review-id", "decision-one", "--validator", worker.to_str().unwrap(),
+        "--key", key.to_str().unwrap(), "--anchor", &anchor.public_hex(),
+        "--anchor-cert", &anchor.certify(&working.public_hex()).unwrap(),
+    ]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let modern: Catalog = serde_json::from_slice(&fs::read(&v2_path).unwrap()).unwrap();
+    assert_eq!((modern.schema, modern.sequence, modern.entries.len()), (2, 1, 1));
+    verify_catalog(&modern, &anchor.public_hex()).unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_hub")).args([
+        "admin", "status", "--catalog", v2_path.to_str().unwrap(), "--anchor", &anchor.public_hex(),
+    ]).output().unwrap();
+    assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+    let renewal = Command::new(env!("CARGO_BIN_EXE_hub")).args([
+        "admin", "renew", "--catalog", v2_path.to_str().unwrap(), "--catalog-schema", "2",
+        "--state-dir", f.root.join("v2-state").to_str().unwrap(), "--expected-sequence", "1",
+        "--idempotency-key", "v2-renewal", "--anchor", &anchor.public_hex(),
+        "--key", key.to_str().unwrap(), "--anchor-cert", &anchor.certify(&working.public_hex()).unwrap(),
+    ]).output().unwrap();
+    assert!(renewal.status.success(), "{}", String::from_utf8_lossy(&renewal.stderr));
+    let renewed: Catalog = serde_json::from_slice(&fs::read(&v2_path).unwrap()).unwrap();
+    assert_eq!((renewed.schema, renewed.sequence), (2, 2));
+    assert!(release::ReleaseStore::open_format(&v2_path, &f.root.join("public/private-state"), &anchor.public_hex(), CatalogFormat::V2).is_err(),
+        "v2 state cannot be stored anywhere under the public distribution root");
+    assert_eq!(fs::read(&legacy_path).unwrap(), serde_json::to_vec_pretty(&legacy).unwrap());
+}
+
+#[test]
+fn v2_publication_refuses_a_lower_release_number() {
+    let mut f = Fixture::new();
+    let anchor = HubKey::generate();
+    let working = HubKey::generate();
+    let key = f.root.join("working.key");
+    fs::write(&key, hex::encode(working.to_bytes())).unwrap();
+    let v2_path = f.root.join("public/v2/catalog.json");
+    fs::create_dir_all(v2_path.parent().unwrap()).unwrap();
+    let publish = |f: &Fixture, expected: u64, request: &str| {
+        let worker = f.protocol_worker();
+        Command::new(env!("CARGO_BIN_EXE_hub")).args([
+            "admin", "publish", f.bundle.to_str().unwrap(), "--catalog", v2_path.to_str().unwrap(),
+            "--catalog-schema", "2", "--state-dir", f.root.join("v2-state").to_str().unwrap(),
+            "--expected-sequence", &expected.to_string(), "--idempotency-key", request,
+            "--publisher", "publisher-one", "--publisher-key", &format!("publisher-one={}", f.publisher.public_hex()),
+            "--reviewed-by", "operator", "--review-id", request, "--validator", worker.to_str().unwrap(),
+            "--key", key.to_str().unwrap(), "--anchor", &anchor.public_hex(),
+            "--anchor-cert", &anchor.certify(&working.public_hex()).unwrap(),
+        ]).output().unwrap()
+    };
+    let mut value = serde_json::to_value(&f.manifest).unwrap();
+    value["schema"] = serde_json::json!(2);
+    value["release_number"] = serde_json::json!(20);
+    value["runtime"] = serde_json::json!({"api":"1","min_build":1,"platforms":[std::env::consts::OS]});
+    value["requires"] = serde_json::json!(["card.ui@1"]);
+    value["entrypoints"] = serde_json::json!({"ui":"page.card"});
+    value["data_schema"] = serde_json::json!(1);
+    f.manifest = octosense_app_policy::AppManifest::parse(&value.to_string()).unwrap();
+    f.sign();
+    let first = publish(&f, 0, "first");
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    value["version"] = serde_json::json!("2.0.0");
+    value["release_number"] = serde_json::json!(12);
+    f.manifest = octosense_app_policy::AppManifest::parse(&value.to_string()).unwrap();
+    f.sign();
+    let lower = publish(&f, 1, "lower");
+    assert!(!lower.status.success(), "release number 12 must not follow 20");
+    let catalog: Catalog = serde_json::from_slice(&fs::read(&v2_path).unwrap()).unwrap();
+    assert_eq!((catalog.sequence, catalog.entries.len()), (1, 1));
+}
+
+#[test]
+fn v2_publication_preserves_v1_publisher_ownership() {
+    let mut f = Fixture::new();
+    let anchor = HubKey::generate();
+    let working = HubKey::generate();
+    let key = f.root.join("working.key");
+    fs::write(&key, hex::encode(working.to_bytes())).unwrap();
+    let legacy_entry = f.entry();
+    let mut legacy = Catalog::new(1, &today(), vec![legacy_entry]);
+    working.sign_catalog(&mut legacy, &anchor.certify(&working.public_hex()).unwrap()).unwrap();
+    write_catalog(&f.root.join("public/catalog.json"), &legacy);
+    let mut value = serde_json::to_value(&f.manifest).unwrap();
+    value["schema"] = serde_json::json!(2);
+    value["version"] = serde_json::json!("2.0.0");
+    value["release_number"] = serde_json::json!(2);
+    value["runtime"] = serde_json::json!({"api":"1","min_build":1,"platforms":[std::env::consts::OS]});
+    value["requires"] = serde_json::json!(["card.ui@1"]);
+    value["entrypoints"] = serde_json::json!({"ui":"page.card"});
+    value["data_schema"] = serde_json::json!(1);
+    f.manifest = octosense_app_policy::AppManifest::parse(&value.to_string()).unwrap();
+    f.publisher = HubKey::generate();
+    f.sign();
+    let v2_path = f.root.join("public/v2/catalog.json");
+    fs::create_dir_all(v2_path.parent().unwrap()).unwrap();
+    let worker = f.protocol_worker();
+    let output = Command::new(env!("CARGO_BIN_EXE_hub")).args([
+        "admin", "publish", f.bundle.to_str().unwrap(), "--catalog", v2_path.to_str().unwrap(),
+        "--catalog-schema", "2", "--state-dir", f.root.join("v2-state").to_str().unwrap(),
+        "--expected-sequence", "0", "--idempotency-key", "hijack",
+        "--publisher", "publisher-one", "--publisher-key", &format!("publisher-one={}", f.publisher.public_hex()),
+        "--reviewed-by", "operator", "--review-id", "hijack", "--validator", worker.to_str().unwrap(),
+        "--key", key.to_str().unwrap(), "--anchor", &anchor.public_hex(),
+        "--anchor-cert", &anchor.certify(&working.public_hex()).unwrap(),
+    ]).output().unwrap();
+    assert!(!output.status.success(), "v2 must preserve v1 publisher key binding");
+    assert!(!v2_path.exists());
+    assert_eq!(serde_json::from_slice::<Catalog>(&fs::read(f.root.join("public/catalog.json")).unwrap()).unwrap().sequence, 1);
+}
+
+#[test]
 fn recovery_republishes_durable_history_above_the_high_water_mark() {
     let f = Fixture::new();
     let anchor = HubKey::generate();

@@ -105,9 +105,26 @@ impl Entry {
 }
 
 /// The signed list a device reads. `signature` covers [`Catalog::signing_bytes`].
+#[derive(Clone, Debug)]
+pub struct Catalog {
+    pub schema: u32,
+    /// Increases with every publish; a device refuses to go backwards, so a
+    /// replayed older catalog cannot un-withdraw an app.
+    pub sequence: u64,
+    /// When this catalog was signed, ISO 8601. The device's freshness window
+    /// is measured from here.
+    pub published: String,
+    pub entries: Vec<Entry>,
+    /// Hex ed25519 signature by the hub's working key.
+    pub signature: Option<String>,
+    /// The working key that signed it, and the anchor's certificate for it.
+    pub key: Option<WorkingKey>,
+}
+
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Catalog {
+struct CatalogV1 {
     pub schema: u32,
     /// Increases with every publish; a device refuses to go backwards, so a
     /// replayed older catalog cannot un-withdraw an app.
@@ -122,6 +139,49 @@ pub struct Catalog {
     /// The working key that signed it, and the anchor's certificate for it.
     #[serde(default)]
     pub key: Option<WorkingKey>,
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogV2 {
+    pub schema: u32,
+    /// Increases with every publish; a device refuses to go backwards, so a
+    /// replayed older catalog cannot un-withdraw an app.
+    pub sequence: u64,
+    /// When this catalog was signed, ISO 8601. The device's freshness window
+    /// is measured from here.
+    pub published: String,
+    pub entries: Vec<Entry>,
+    /// Hex ed25519 signature by the hub's working key.
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// The working key that signed it, and the anchor's certificate for it.
+    #[serde(default)]
+    pub key: Option<WorkingKey>,
+}
+
+impl<'de> Deserialize<'de> for Catalog {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = octosense_app_policy::wire::value(deserializer)?;
+        let catalog = match value.get("schema").and_then(serde_json::Value::as_u64) {
+            Some(1) => { let w: CatalogV1 = serde_json::from_value(value).map_err(serde::de::Error::custom)?; Self { schema: w.schema, sequence: w.sequence, published: w.published, entries: w.entries, signature: w.signature, key: w.key } },
+            Some(2) => { let w: CatalogV2 = serde_json::from_value(value).map_err(serde::de::Error::custom)?; Self { schema: w.schema, sequence: w.sequence, published: w.published, entries: w.entries, signature: w.signature, key: w.key } },
+            schema => return Err(serde::de::Error::custom(format!("unsupported catalog schema {schema:?}"))),
+        };
+        catalog.validate_schema().map_err(serde::de::Error::custom)?;
+        Ok(catalog)
+    }
+}
+impl Serialize for Catalog {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate_schema().map_err(serde::ser::Error::custom)?;
+        match self.schema {
+            1 => CatalogV1 { schema: self.schema, sequence: self.sequence, published: self.published.clone(), entries: self.entries.clone(), signature: self.signature.clone(), key: self.key.clone() }.serialize(serializer),
+            2 => CatalogV2 { schema: self.schema, sequence: self.sequence, published: self.published.clone(), entries: self.entries.clone(), signature: self.signature.clone(), key: self.key.clone() }.serialize(serializer),
+            _ => Err(serde::ser::Error::custom("unsupported catalog schema")),
+        }
+    }
 }
 
 /// The hub's day-to-day signing key, certified by the offline anchor. A
@@ -139,6 +199,27 @@ pub struct WorkingKey {
 pub const CATALOG_SCHEMA: u32 = 1;
 
 impl Catalog {
+    pub fn validate_schema(&self) -> Result<(), String> {
+        if !matches!(self.schema, 1 | 2) { return Err(format!("unsupported catalog schema {}", self.schema)); }
+        let mut versions = std::collections::BTreeSet::new();
+        let mut numbers = std::collections::BTreeSet::new();
+        for entry in &self.entries {
+            entry.manifest.validate_schema()?;
+            if self.schema == 2 && !versions.insert((entry.app_id(), entry.version())) {
+                return Err("catalog has duplicate app/version identity".into());
+            }
+            if let Some(contract) = entry.manifest.contract() {
+                if !numbers.insert((entry.app_id(), contract.release_number)) {
+                    return Err("catalog has duplicate app/release_number identity".into());
+                }
+            }
+            if self.schema == 1 && entry.manifest.schema != 1 {
+                return Err("v1 catalog may only contain v1 manifests".into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(sequence: u64, published: &str, entries: Vec<Entry>) -> Self {
         Catalog {
             schema: CATALOG_SCHEMA,
@@ -215,4 +296,13 @@ mod tests {
             assert_ne!(line, &format!("Use {capability}"), "{capability} has no plain-words line");
         }
     }
+}
+
+/// A trust/cache domain selected by the host, never inferred from network bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CatalogFormat { V1, V2 }
+impl CatalogFormat {
+    pub fn schema(self) -> u32 { match self { Self::V1 => 1, Self::V2 => 2 } }
+    pub fn relative_catalog(self) -> &'static str { match self { Self::V1 => "catalog.json", Self::V2 => "v2/catalog.json" } }
+    pub fn cache_filename(self) -> &'static str { match self { Self::V1 => "catalog.json", Self::V2 => "catalog-v2.json" } }
 }

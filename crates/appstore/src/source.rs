@@ -32,6 +32,14 @@ impl Origin {
         if value.starts_with("http") { Origin::Http(value.to_string()) } else { Origin::Directory(PathBuf::from(value)) }
     }
 
+    pub fn for_format(&self, format: octosense_app_hub::CatalogFormat) -> Self {
+        if format == octosense_app_hub::CatalogFormat::V1 { return self.clone(); }
+        match self {
+            Self::Directory(root) => Self::Directory(root.join("v2")),
+            Self::Http(base) => Self::Http(format!("{}/v2", base.trim_end_matches('/'))),
+        }
+    }
+
     pub fn describe(&self) -> String {
         match self {
             Origin::Directory(path) => path.display().to_string(),
@@ -88,4 +96,12 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Explicit reader rollout switch; catalog bytes cannot opt a legacy endpoint
+/// into new semantics. Production defaults to v1 until v2 is provisioned.
+pub fn configured_format() -> octosense_app_hub::CatalogFormat {
+    if std::env::var("OCTOSENSE_HUB_SCHEMA").as_deref() == Ok("2") {
+        octosense_app_hub::CatalogFormat::V2
+    } else { octosense_app_hub::CatalogFormat::V1 }
 }

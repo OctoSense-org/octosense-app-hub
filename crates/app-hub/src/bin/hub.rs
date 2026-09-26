@@ -6,14 +6,16 @@
 //! hub stamp <bundle>                      # write the bundle digest into its manifest
 //! hub sign-manifest <bundle> --key <key> --key-id <id>
 //! hub check <bundle> [--catalog <file>] [--allow-unsigned] [--publisher-key id=hex]
-//! hub publish <bundle> --catalog <file> --key <working> --anchor-cert <hex>
-//!             --publisher <id> --repo <url> --commit <sha> [--out <dir>]
+//! hub admin publish <bundle> --catalog <file> --state-dir <private>
+//!             --expected-sequence <n> --idempotency-key <request>
+//!             --key <working> --anchor-cert <hex> --reviewed-by <operator>
+//!             --review-id <decision> --publisher <id> [--catalog-schema 2]
 //! hub verify <catalog> --anchor <hex>
 //! ```
 //!
 //! `check` is the gate: a developer runs it before submitting and sees the
-//! same report the hub's job produces. `publish` runs the gate again, copies
-//! the bundle into the artifact store and signs the catalog.
+//! same report the hub's job produces. `admin publish` runs the gate again,
+//! copies the bundle into the artifact store and signs the catalog.
 use octosense_app_hub::*;
 use octosense_app_hub::scan::Route;
 use octosense_app_policy::{AppManifest, HostLimits};
@@ -34,6 +36,11 @@ fn run() -> Result<(), String> {
     let command = argv.get(1).map(String::as_str).unwrap_or("help");
     let flag = |name: &str| argv.windows(2).find(|w| w[0] == format!("--{name}")).map(|w| w[1].clone());
     let has = |name: &str| argv.iter().any(|a| a == &format!("--{name}"));
+    let catalog_format = || match flag("catalog-schema").as_deref().unwrap_or("1") {
+        "1" => Ok(CatalogFormat::V1),
+        "2" => Ok(CatalogFormat::V2),
+        _ => Err("--catalog-schema must be 1 or 2".to_string()),
+    };
     let positional = argv.get(2).cloned();
 
     match command {
@@ -87,7 +94,7 @@ fn run() -> Result<(), String> {
             let anchor = flag("anchor").ok_or("--anchor <trusted public key>")?;
             let working = load_key(&flag("key").ok_or("--key <working key file>")?)?;
             let certificate = flag("anchor-cert").ok_or("--anchor-cert <certificate>")?;
-            let store = release::ReleaseStore::open(&catalog_path, &state, &anchor)?;
+            let store = release::ReleaseStore::open_format(&catalog_path, &state, &anchor, catalog_format()?)?;
             let signer = signing::LocalCatalogSigner { key: &working, anchor_certificate: &certificate };
             let catalog = if positional.as_deref() == Some("recover") {
                 store.recover(expected.parse::<u64>().map_err(|e| e.to_string())?, &request, &today(), &signer)?
@@ -212,7 +219,7 @@ fn run() -> Result<(), String> {
             }
             let working = load_key(&flag("key").ok_or("--key <working key file>")?)?;
             let certificate = flag("anchor-cert").ok_or("--anchor-cert <certificate>")?;
-            let store = release::ReleaseStore::open(&catalog_path, &state, &anchor)?;
+            let store = release::ReleaseStore::open_format(&catalog_path, &state, &anchor, catalog_format()?)?;
             let catalog = store.publish(expected, &request, &today(), &signing::LocalCatalogSigner { key: &working, anchor_certificate: &certificate }, &release)?;
             println!("published {} {} (catalog sequence {}, approval {})", report.app_id, report.version, catalog.sequence, release.id());
             Ok(())
@@ -228,7 +235,7 @@ fn run() -> Result<(), String> {
             let anchor = flag("anchor").ok_or("--anchor <trusted public key>")?;
             let working = load_key(&flag("key").ok_or("--key <working key file>")?)?;
             let certificate = flag("anchor-cert").ok_or("--anchor-cert <certificate>")?;
-            let store = release::ReleaseStore::open(&catalog_path, &state, &anchor)?;
+            let store = release::ReleaseStore::open_format(&catalog_path, &state, &anchor, catalog_format()?)?;
             let catalog = store.withdraw(expected, &request, &today(), &signing::LocalCatalogSigner { key: &working, anchor_certificate: &certificate }, &app, &version, &reason)?;
             println!("withdrew {app} {version}: {reason} (catalog sequence {})", catalog.sequence);
             Ok(())

@@ -91,9 +91,8 @@ impl CardAppView {
         self.view.label(cx, ids!(notice)).set_text(cx, "Checking installed app…");
         match cx.thread_spawner().spawn_worker(ThreadOptions::default(), move || {
             let result = (|| {
-                let mut store = Store::new(&anchor, &root, HostLimits::default());
-                let catalog = std::fs::read_to_string(root.join("catalog.json"))
-                    .map_err(|e| format!("no cached catalog: {e}"))?;
+                let mut store = Store::with_runtime(&anchor, &root, HostLimits::default(), octosense_app_policy::compatibility::RuntimeDescriptor::current(), crate::source::configured_format());
+                let catalog = std::fs::read_to_string(root.join(store.format().cache_filename())).map_err(|e| format!("no cached catalog: {e}"))?;
                 store.accept_catalog(&catalog)?;
                 store.prepare_launch(&app_id)
             })();
@@ -111,8 +110,8 @@ impl CardAppView {
         // Hashing ran on the worker. Recheck authenticated metadata on the UI
         // thread before loading the already-owned code snapshot.
         let current = (|| {
-            let mut store = Store::new(&anchor, &root, HostLimits::default());
-            store.accept_catalog(&std::fs::read_to_string(root.join("catalog.json")).map_err(|e| e.to_string())?)?;
+            let mut store = Store::with_runtime(&anchor, &root, HostLimits::default(), octosense_app_policy::compatibility::RuntimeDescriptor::current(), crate::source::configured_format());
+            store.accept_catalog(&std::fs::read_to_string(root.join(store.format().cache_filename())).map_err(|e| e.to_string())?)?;
             if let Some(guard) = &self.catalog_guard { guard(store.catalog().unwrap().sequence)?; }
             store.validate_prepared_launch(&prepared)
         })();

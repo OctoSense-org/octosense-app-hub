@@ -24,7 +24,20 @@ fn script_bundle_prepares_without_a_card() {
     let source = octosense_app_validator::card_source(&f.bundle, "http://127.0.0.1:1/").unwrap();
     assert!(source.contains("Hello"));
     let result = Command::new(env!("CARGO_BIN_EXE_app-validator")).arg(&f.bundle).output().unwrap();
-    assert!(result.status.success(), "{} {}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    assert!(result.status.success(), "{} {}", String::from_utf8_lossy(&result.stdout).chars().take(1000).collect::<String>(), String::from_utf8_lossy(&result.stderr).chars().take(1000).collect::<String>());
+}
+
+#[test]
+fn script_validation_uses_the_host_registered_sys_vocabulary() {
+    let mut f = Fixture::new();
+    fs::remove_file(f.bundle.join("page.card")).unwrap();
+    fs::remove_file(f.bundle.join("page.data.json")).unwrap();
+    fs::remove_dir_all(f.bundle.join("kit")).unwrap();
+    fs::write(f.bundle.join("main.splash"), "if sys.simsecs(10) >= 0 { HostedView{width: Fill height: Fill full: View{width: Fill height: Fill Label{text: \"Hello\"}} tile: View{width: Fill height: Fill Label{text: \"Hello\"}}} }").unwrap();
+    f.sign();
+    assert!(f.report(None).passed());
+    let result = Command::new(env!("CARGO_BIN_EXE_app-validator")).arg(&f.bundle).output().unwrap();
+    assert!(result.status.success(), "{} {}", String::from_utf8_lossy(&result.stdout).chars().take(1000).collect::<String>(), String::from_utf8_lossy(&result.stderr).chars().take(1000).collect::<String>());
 }
 
 #[test]

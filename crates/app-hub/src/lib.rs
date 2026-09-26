@@ -34,7 +34,7 @@ pub use pack::{pack_dir, unpack, Pack};
 pub use remote::{today, Remote};
 pub use scan::{packet, scan, Packet, Route, Verdict};
 pub use gate::{check_bundle, entry_for, Finding, GateReport, Severity};
-pub use index::{Catalog, Entry, Source, Status, WorkingKey, CATALOG_SCHEMA};
+pub use index::{CatalogFormat, Catalog, Entry, Source, Status, WorkingKey, CATALOG_SCHEMA};
 pub use signing::{sign_manifest, verify_catalog, HubKey, PublisherKeys};
 
 #[cfg(test)]

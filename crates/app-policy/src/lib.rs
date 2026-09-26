@@ -28,6 +28,7 @@
 //! assert!(policy.agent.is_none(), "an app gets no agent unless it asks");
 //! ```
 pub mod assets;
+pub mod compatibility;
 pub mod bundle;
 pub mod containers;
 pub mod entry;
@@ -37,6 +38,8 @@ pub mod splash_adapter;
 pub mod manifest;
 pub mod policy;
 pub mod verify;
+#[doc(hidden)]
+pub mod wire;
 
 pub use assets::{rewrite_assets, AssetServer, StaticAssets};
 pub use bundle::{digest_dir, MANIFEST_FILE};

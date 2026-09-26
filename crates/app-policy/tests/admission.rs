@@ -59,9 +59,9 @@ fn an_unknown_field_is_refused_so_a_newer_manifest_cannot_run_under_looser_rules
 
 #[test]
 fn a_foreign_schema_is_refused() {
-    let json = manifest_with("").replace(r#""schema":1"#, r#""schema":2"#);
+    let json = manifest_with("").replace(r#""schema":1"#, r#""schema":99"#);
     let err = admit_and_resolve(&json, BUNDLE, &open_limits(), &RefuseAllSignatures).unwrap_err();
-    assert!(err.contains("schema 2 is not 1"), "{err}");
+    assert!(err.contains("manifest schema 99"), "{err}");
 }
 
 // ------------------------------------------------------------ capabilities

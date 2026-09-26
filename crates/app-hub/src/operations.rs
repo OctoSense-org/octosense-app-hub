@@ -16,7 +16,7 @@ pub struct Health {
 
 pub fn health(catalog: &Catalog, anchor: &str, now: &str) -> Result<Health, String> {
     verify_catalog(catalog, anchor)?;
-    if catalog.schema != crate::CATALOG_SCHEMA { return Err("unsupported catalog schema".into()); }
+    if !matches!(catalog.schema, 1 | 2) { return Err("unsupported catalog schema".into()); }
     crate::release::date(now)?;
     crate::release::valid_date_at(&catalog.published, now)?;
     let age_days = crate::days_between(&catalog.published, now).ok_or("invalid catalog date")?;

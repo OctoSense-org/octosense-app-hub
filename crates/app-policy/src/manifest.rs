@@ -7,8 +7,7 @@
 //! not silently run with less containment than it asked for.
 use serde::{Deserialize, Serialize};
 
-/// The manifest schema this build understands. A bundle declaring anything
-/// else is refused: an older host must not guess at a newer grammar.
+/// Legacy schema used by existing templates. The versioned reader supports 1 and 2.
 pub const SCHEMA: u32 = 1;
 
 /// Every capability an app may request. The list is closed on purpose — a
@@ -71,16 +70,36 @@ impl ProfileMode {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct AppManifest {
-    /// Must equal [`SCHEMA`].
+    /// Version of the signed wire representation.
     pub schema: u32,
     /// Stable identity. Also the name of the app's storage jail, so it is
     /// constrained to the characters a path component may hold.
     pub id: String,
-    /// Opaque to the host, but pinned: a different version is a different
-    /// bundle and must be admitted again.
+    /// Opaque for v1; SemVer display label for v2. Both are immutable identities.
+    pub version: String,
+    /// What a person calls it.
+    pub name: String,
+    pub integrity: Integrity,
+    pub capabilities: Vec<String>,
+    pub network: Network,
+    pub storage: Storage,
+    pub compute: Compute,
+    /// Absent means the app gets no agent at all, which is the default.
+    pub agent: Option<AgentSpec>,
+    contract: Option<crate::compatibility::ManifestContract>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestV1 {
+    /// Version of the signed wire representation.
+    pub schema: u32,
+    /// Stable identity. Also the name of the app's storage jail, so it is
+    /// constrained to the characters a path component may hold.
+    pub id: String,
+    /// Opaque for v1; SemVer display label for v2. Both are immutable identities.
     pub version: String,
     /// What a person calls it.
     pub name: String,
@@ -96,6 +115,60 @@ pub struct AppManifest {
     /// Absent means the app gets no agent at all, which is the default.
     #[serde(default)]
     pub agent: Option<AgentSpec>,
+}
+
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestV2 {
+    /// Version of the signed wire representation.
+    pub schema: u32,
+    /// Stable identity. Also the name of the app's storage jail, so it is
+    /// constrained to the characters a path component may hold.
+    pub id: String,
+    /// Opaque for v1; SemVer display label for v2. Both are immutable identities.
+    pub version: String,
+    /// What a person calls it.
+    pub name: String,
+    pub integrity: Integrity,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub network: Network,
+    #[serde(default)]
+    pub storage: Storage,
+    #[serde(default)]
+    pub compute: Compute,
+    /// Absent means the app gets no agent at all, which is the default.
+    #[serde(default)]
+    pub agent: Option<AgentSpec>,
+    release_number: u64,
+    runtime: crate::compatibility::RuntimeRequirements,
+    requires: Vec<String>,
+    entrypoints: crate::compatibility::Entrypoints,
+    data_schema: u64,
+}
+// Freeze the original representation: v2 fields never enter v1 signing bytes.
+impl<'de> Deserialize<'de> for AppManifest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = crate::wire::value(deserializer)?;
+        let manifest = match value.get("schema").and_then(serde_json::Value::as_u64) {
+            Some(1) => { let w: ManifestV1 = serde_json::from_value(value).map_err(serde::de::Error::custom)?; Self { schema: w.schema, id: w.id, version: w.version, name: w.name, integrity: w.integrity, capabilities: w.capabilities, network: w.network, storage: w.storage, compute: w.compute, agent: w.agent, contract: None } },
+            Some(2) => { let w: ManifestV2 = serde_json::from_value(value).map_err(serde::de::Error::custom)?; Self { schema: w.schema, id: w.id, version: w.version, name: w.name, integrity: w.integrity, capabilities: w.capabilities, network: w.network, storage: w.storage, compute: w.compute, agent: w.agent, contract: Some(crate::compatibility::ManifestContract { release_number: w.release_number, runtime: w.runtime, requires: w.requires, entrypoints: w.entrypoints, data_schema: w.data_schema }) } },
+            schema => return Err(serde::de::Error::custom(format!("unsupported manifest schema {}", schema.map(|s| s.to_string()).unwrap_or_else(|| "(missing or invalid)".into())))),
+        };
+        manifest.validate_schema().map_err(serde::de::Error::custom)?;
+        Ok(manifest)
+    }
+}
+impl Serialize for AppManifest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate_schema().map_err(serde::ser::Error::custom)?;
+        match &self.contract {
+            None => ManifestV1 { schema: self.schema, id: self.id.clone(), version: self.version.clone(), name: self.name.clone(), integrity: self.integrity.clone(), capabilities: self.capabilities.clone(), network: self.network.clone(), storage: self.storage.clone(), compute: self.compute.clone(), agent: self.agent.clone() }.serialize(serializer),
+            Some(c) => ManifestV2 { schema: self.schema, id: self.id.clone(), version: self.version.clone(), name: self.name.clone(), integrity: self.integrity.clone(), capabilities: self.capabilities.clone(), network: self.network.clone(), storage: self.storage.clone(), compute: self.compute.clone(), agent: self.agent.clone(), release_number: c.release_number, runtime: c.runtime.clone(), requires: c.requires.clone(), entrypoints: c.entrypoints.clone(), data_schema: c.data_schema }.serialize(serializer),
+        }
+    }
 }
 
 /// What the bundle must hash to. The digest covers the bundle bytes as they
@@ -169,12 +242,19 @@ pub struct AgentSpec {
 }
 
 impl AppManifest {
+    pub fn contract(&self) -> Option<&crate::compatibility::ManifestContract> { self.contract.as_ref() }
+
+    pub fn validate_schema(&self) -> Result<(), String> {
+        match (self.schema, &self.contract) {
+            (1, None) => Ok(()),
+            (2, Some(contract)) => contract.validate(&self.version),
+            _ => Err(format!("unsupported or inconsistent manifest schema {}", self.schema)),
+        }
+    }
+
     /// Parse a manifest, refusing unknown fields and a foreign schema.
     pub fn parse(json: &str) -> Result<Self, String> {
         let manifest: AppManifest = serde_json::from_str(json).map_err(|e| format!("manifest is not valid: {e}"))?;
-        if manifest.schema != SCHEMA {
-            return Err(format!("manifest schema {} is not {}", manifest.schema, SCHEMA));
-        }
         Ok(manifest)
     }
 

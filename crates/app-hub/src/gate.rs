@@ -56,6 +56,7 @@ pub struct GateReport {
     /// What the app would actually get, when the gate passed.
     pub policy: Option<AppPolicy>,
     pub resources: Vec<crate::admission::ResourceReference>,
+    pub compatibility: octosense_app_policy::compatibility::CompatibilityResult,
     // Bind entry creation to the complete manifest checked by this report.
     admitted_manifest: Vec<u8>,
 }
@@ -68,7 +69,7 @@ impl GateReport {
         serde_json::json!({
             "schema": 1, "stage": "structural", "passed": self.passed(),
             "app_id": self.app_id, "version": self.version, "digest": self.digest,
-            "findings": self.findings, "resources": self.resources,
+            "findings": self.findings, "resources": self.resources, "compatibility": self.compatibility,
         })
     }
 
@@ -146,6 +147,24 @@ pub fn check_bundle(
             "identity",
             format!("{} is under os., which is reserved for system apps that ship with the device", manifest.id),
         ));
+    }
+
+    if let Some(contract) = manifest.contract() {
+        let entry = if files.iter().any(|file| file.path == Path::new(octosense_app_policy::SCRIPT_ENTRY)) {
+            octosense_app_policy::SCRIPT_ENTRY
+        } else {
+            "page.card"
+        };
+        if contract.entrypoints.ui != entry {
+            findings.push(Finding::refuse("entrypoint", format!(
+                "manifest names {}, but this bundle runs {entry}", contract.entrypoints.ui
+            )));
+        }
+        if let Some(logic) = &contract.entrypoints.logic {
+            if !files.iter().any(|file| file.path == Path::new(logic)) {
+                findings.push(Finding::refuse("entrypoint", format!("missing declared logic entrypoint {logic}")));
+            }
+        }
     }
 
     // ---- contents -------------------------------------------------------
@@ -243,8 +262,10 @@ pub fn check_bundle(
         }
     }
 
+    let compatibility = octosense_app_policy::compatibility::evaluate(&manifest, &octosense_app_policy::compatibility::RuntimeDescriptor::current());
+    for reason in &compatibility.reasons { findings.push(Finding::refuse("compatibility", reason.message.clone())); }
     let admitted_manifest = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
-    Ok(GateReport { app_id: manifest.id, version: manifest.version, digest, findings, policy, resources, admitted_manifest })
+    Ok(GateReport { app_id: manifest.id, version: manifest.version, digest, findings, policy, resources, compatibility, admitted_manifest })
 }
 
 /// Anything in the bundle's text that reaches outside it: an absolute URL, or

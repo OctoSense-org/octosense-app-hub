@@ -22,6 +22,7 @@ publisher's repository.
 | `artifacts/<app>-<version>.bundle.pack.json` | The same bundle as one file, which stores download. |
 | `docs/FIRST-APP.md` | First-app walkthrough for a card app or a script app: author, package, run, capture, validate and submit. |
 | `docs/PUBLISHING.md` | The bundle, listing, capabilities, host services, gate rules, signing and submission contract. |
+| `docs/reference/manifest-v2.md` | The explicit v2 runtime contract, compatibility checks and dual-catalog rollout. |
 | `docs/ICONS.md` | Canonical icon ownership, export constraints and visual review. |
 | `docs/DEVELOPMENT.md` | Where authoring lives, delivery paths, and `card-host` with its remote-control routes. |
 | `templates/app/` | Card app repository scaffold with metadata, example icon and linked agent instructions. |

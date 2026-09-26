@@ -1,6 +1,6 @@
 //! Operator release transactions. The state directory is private durable
 //! signing history, backed up separately from the public catalog/artifacts.
-use crate::{Catalog, verify_catalog, signing::CatalogSigner};
+use crate::{Catalog, CatalogFormat, verify_catalog, signing::CatalogSigner, publishers::PublisherRegistry};
 use serde::{Deserialize, Serialize};
 use std::{fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}};
 
@@ -47,7 +47,7 @@ impl Change<'_> {
             Self::Withdraw { app, version, reason } => serde_json::json!({"operation":"withdraw","app":app,"version":version,"reason":reason}),
         }
     }
-    fn candidate(&self, current: &Catalog, now: &str) -> Result<Catalog, String> {
+    fn candidate(&self, current: &Catalog, now: &str, registry: &crate::publishers::CatalogPublishers) -> Result<Catalog, String> {
         let mut next = current.clone();
         match self {
             Self::Renew | Self::Recover => { if current.published.is_empty() { return Err("renewal requires an existing signed catalog".into()); } }
@@ -55,8 +55,16 @@ impl Change<'_> {
                 if current.entries.iter().any(|entry| entry.app_id() == release.entry.app_id() && entry.version() == release.entry.version()) {
                     return Err("this app version is already in the catalog".into());
                 }
-                let registry = crate::publishers::CatalogPublishers::from_catalog(current)?;
-                crate::publishers::verify_continuity(&release.entry.manifest, &registry)?;
+                if let Some(contract) = release.entry.manifest.contract() {
+                    let highest = current.entries.iter()
+                        .filter(|entry| entry.app_id() == release.entry.app_id())
+                        .filter_map(|entry| entry.manifest.contract().map(|contract| contract.release_number))
+                        .max().unwrap_or(0);
+                    if contract.release_number <= highest {
+                        return Err(format!("release_number {} must be greater than the existing release {}", contract.release_number, highest));
+                    }
+                }
+                crate::publishers::verify_continuity(&release.entry.manifest, registry)?;
                 let mut entry = release.entry.clone();
                 entry.admitted = now.into();
                 next.entries.push(entry);
@@ -83,8 +91,10 @@ impl Change<'_> {
 pub struct ReleaseStore {
     catalog_path: PathBuf,
     state: PathBuf,
+    ownership: PathBuf,
     anchor: String,
     catalog: Catalog,
+    _domain_lock: File,
     _lock: File,
 }
 
@@ -92,42 +102,154 @@ impl ReleaseStore {
     /// Locks the catalog's canonical sibling lock for the entire transaction.
     /// All writers must use this boundary; manual catalog edits are unsupported.
     pub fn open(catalog_path: &Path, state: &Path, anchor: &str) -> Result<Self, String> {
+        Self::open_format(catalog_path, state, anchor, CatalogFormat::V1)
+    }
+
+    pub fn open_format(catalog_path: &Path, state: &Path, anchor: &str, format: CatalogFormat) -> Result<Self, String> {
         let parent = catalog_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
         let parent = parent.canonicalize().map_err(|e| e.to_string())?;
         let catalog_path = parent.join(catalog_path.file_name().ok_or("catalog filename is missing")?);
+        if format == CatalogFormat::V1 && catalog_path.file_name().is_none_or(|name| name != "catalog.json") {
+            return Err("v1 catalog must be at <public root>/catalog.json for shared publisher ownership".into());
+        }
+        let public_root = if format == CatalogFormat::V2 {
+            if parent.file_name().is_none_or(|name| name != "v2")
+                || catalog_path.file_name().is_none_or(|name| name != "catalog.json") {
+                return Err("v2 catalog must be at <public root>/v2/catalog.json".into());
+            }
+            parent.parent().ok_or("v2 catalog has no public root")?
+        } else { parent.as_path() };
+        // All schema writers take the same lock before reading either catalog
+        // or their shared publisher reservations.
+        let domain_lock = lock_file(&public_root.join(".release-domain.lock"))?;
         if fs::symlink_metadata(&catalog_path).is_ok_and(|meta| meta.file_type().is_symlink()) {
             return Err("catalog pointer may not be a symlink".into());
         }
         let lock_path = catalog_path.with_file_name(format!("{}.release.lock", catalog_path.file_name().unwrap().to_string_lossy()));
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true);
-        #[cfg(unix)] {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
-        }
-        let lock = options.open(&lock_path).map_err(|e| e.to_string())?;
-        #[cfg(unix)] {
-            use std::os::fd::AsRawFd;
-            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 { return Err(std::io::Error::last_os_error().to_string()); }
-        }
-        #[cfg(not(unix))] { return Err("release transactions require a supported Unix operator runner".into()); }
+        let lock = lock_file(&lock_path)?;
         let catalog: Catalog = if catalog_path.exists() {
             let catalog = read_json(&catalog_path)?;
             verify_catalog(&catalog, anchor)?;
             catalog
-        } else { Catalog::new(0, "", vec![]) };
-        if catalog.schema != crate::CATALOG_SCHEMA { return Err("unsupported catalog schema".into()); }
+        } else {
+            let mut catalog = Catalog::new(0, "", vec![]);
+            catalog.schema = format.schema();
+            catalog
+        };
+        if catalog.schema != format.schema() { return Err("catalog schema does not match the selected operator format".into()); }
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)] { use std::os::unix::fs::DirBuilderExt; builder.mode(0o700); }
         builder.create(state).map_err(|e| e.to_string())?;
         if fs::symlink_metadata(state).map_err(|e| e.to_string())?.file_type().is_symlink() { return Err("release state may not be a symlink".into()); }
         let state = state.canonicalize().map_err(|e| e.to_string())?;
-        if state.starts_with(&parent) { return Err("release state must be outside the public catalog directory".into()); }
+        if state.starts_with(public_root) { return Err("release state must be outside the public distribution root".into()); }
+        let private_root = state.parent().ok_or("release state has no private parent")?;
+        let root_hash = blake3::hash(public_root.to_string_lossy().as_bytes()).to_hex().to_string();
+        let ownership = private_root.join(format!(".app-hub-owners-{root_hash}"));
+        let ownership_binding = blake3::hash(ownership.to_string_lossy().as_bytes()).to_hex().to_string();
+        let marker = public_root.join(".release-ownership.json");
+        if fs::symlink_metadata(&marker).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err("release ownership marker may not be a symlink".into());
+        }
+        if marker.exists() {
+            let bound: String = read_json(&marker)?;
+            if bound != ownership_binding {
+                return Err("v1 and v2 release state must share one private parent directory".into());
+            }
+        } else {
+            immutable_json(&marker, &ownership_binding)?;
+        }
+        sync_parent(&marker)?;
+        if fs::symlink_metadata(&ownership).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err("publisher ownership directory may not be a symlink".into());
+        }
+        builder.create(&ownership).map_err(|e| e.to_string())?;
+        sync_parent(&ownership)?;
+        if state.join("head.json").exists() {
+            let head: Record = read_json(&state.join("head.json"))?;
+            if head.catalog.schema != format.schema() {
+                return Err("release state belongs to another catalog schema".into());
+            }
+        }
         fs::create_dir_all(state.join("requests")).map_err(|e| e.to_string())?;
         sync_parent(&state)?;
         sync_parent(&state.join("requests"))?;
-        Ok(Self { catalog_path, state, anchor: anchor.into(), catalog, _lock: lock })
+        let store = Self { catalog_path, state, ownership, anchor: anchor.into(), catalog, _domain_lock: domain_lock, _lock: lock };
+        store.ownership_registry()?;
+        Ok(store)
+    }
+
+    fn ownership_registry(&self) -> Result<crate::publishers::CatalogPublishers, String> {
+        let sibling = if self.catalog.schema == 2 {
+            self.catalog_path.parent().unwrap().parent().unwrap().join("catalog.json")
+        } else { self.catalog_path.parent().unwrap().join("v2/catalog.json") };
+        let mut catalogs = Vec::new();
+        if sibling.exists() {
+            if fs::symlink_metadata(&sibling).map_err(|e| e.to_string())?.file_type().is_symlink() {
+                return Err("sibling catalog pointer may not be a symlink".into());
+            }
+            let catalog: Catalog = read_json(&sibling)?;
+            verify_catalog(&catalog, &self.anchor)?;
+            if catalog.schema == self.catalog.schema { return Err("sibling catalog schema is wrong".into()); }
+            catalogs.push(catalog);
+        }
+        let mut proofs = Vec::new();
+        for item in fs::read_dir(&self.ownership).map_err(|e| e.to_string())? {
+            let path = item.map_err(|e| e.to_string())?.path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if name.len() != 69 || !name.ends_with(".json") || !name[..64].bytes().all(|b| b.is_ascii_hexdigit()) { continue; }
+            if fs::symlink_metadata(&path).map_err(|e| e.to_string())?.file_type().is_symlink() {
+                return Err("publisher ownership record may not be a symlink".into());
+            }
+            let catalog: Catalog = read_json(&path)?;
+            verify_catalog(&catalog, &self.anchor)?;
+            if hash(&catalog)? != name[..64] { return Err("publisher ownership proof has the wrong digest".into()); }
+            proofs.push(catalog);
+        }
+        // A previous hard-link can be visible even when its directory fsync
+        // failed. Make every validated link durable before trusting it.
+        File::open(&self.ownership).and_then(|file| file.sync_all()).map_err(|e| e.to_string())?;
+        let mut proven_apps: std::collections::HashSet<String> = proofs.iter()
+            .flat_map(|catalog| catalog.entries.iter().map(|entry| entry.app_id().to_string())).collect();
+        let mut all = vec![&self.catalog];
+        all.extend(catalogs.iter());
+        all.extend(proofs.iter());
+        let registry = crate::publishers::CatalogPublishers::from_catalogs(&all)?;
+        // Seed authenticated v1/v2 history before accepting a new publisher.
+        for catalog in std::iter::once(&self.catalog).chain(catalogs.iter()) {
+            if catalog.published.is_empty() { continue; }
+            if catalog.entries.iter().any(|entry| !proven_apps.contains(entry.app_id())) {
+                let path = self.proof_path(catalog)?;
+                if !path.exists() { immutable_json(&path, catalog)?; }
+                sync_parent(&path)?;
+                proven_apps.extend(catalog.entries.iter().map(|entry| entry.app_id().to_string()));
+            }
+        }
+        Ok(registry)
+    }
+
+    fn proof_path(&self, catalog: &Catalog) -> Result<PathBuf, String> {
+        Ok(self.ownership.join(format!("{}.json", hash(catalog)?)))
+    }
+
+    fn reserve_owner(&self, catalog: &Catalog, app_id: &str, signer: &impl CatalogSigner) -> Result<(), String> {
+        if catalog.signature.is_some() { verify_catalog(catalog, &self.anchor)?; }
+        if self.ownership_registry()?.app_owner(app_id).is_some() { return Ok(()); }
+        let entry = catalog.entries.iter().find(|entry| entry.app_id() == app_id)
+            .ok_or("ownership reservation has no matching app")?;
+        let mut proof = Catalog::new(1, &catalog.published, vec![entry.clone()]);
+        proof.schema = catalog.schema;
+        let signed = signer.sign(&ValidatedCatalog { catalog: proof.clone() })?;
+        if signed.signing_bytes()? != proof.signing_bytes()? {
+            return Err("signer changed the validated publisher reservation".into());
+        }
+        proof = signed;
+        verify_catalog(&proof, &self.anchor)?;
+        let path = self.proof_path(&proof)?;
+        if !path.exists() { immutable_json(&path, &proof)?; }
+        sync_parent(&path)?;
+        Ok(())
     }
 
     pub fn catalog(&self) -> &Catalog { &self.catalog }
@@ -244,6 +366,7 @@ impl ReleaseStore {
         let receipt_path = self.state.join("requests").join(format!("{idempotency_hash}.json"));
         let head_path = self.state.join("head.json");
         let intent_path = self.state.join("pending.json");
+        let registry = self.ownership_registry()?;
         let current_hash = hash(&self.catalog)?;
         let head: Option<Record> = if head_path.exists() { Some(read_json(&head_path)?) } else { None };
         if let Some(head) = &head { verify_catalog(&head.catalog, &self.anchor)?; }
@@ -263,7 +386,7 @@ impl ReleaseStore {
                 || intent.previous_hash != current_hash || intent.previous_sequence != expected {
                 return Err("a prepared generation reserves this sequence; retry its original request before another release".into());
             }
-            let intended = change.candidate(&self.catalog, &intent.catalog.published)?;
+            let intended = change.candidate(&self.catalog, &intent.catalog.published, &registry)?;
             if intended.signing_bytes()? != intent.catalog.signing_bytes()? { return Err("prepared transaction does not match this release change".into()); }
         }
         if receipt_path.exists() {
@@ -288,6 +411,9 @@ impl ReleaseStore {
             if head.as_ref().is_some_and(|h| h.catalog.sequence < record.catalog.sequence) {
                 self.check_head(head.as_ref(), &current_hash)?;
             }
+            if let Change::Publish(release) = &change {
+                self.reserve_owner(&record.catalog, release.entry.app_id(), signer)?;
+            }
             change.stage(&self, &hook)?;
             return self.install(&record, &head_path, &hook);
         }
@@ -297,9 +423,14 @@ impl ReleaseStore {
         // staging before reserving a sequence. Refusals cannot publish bytes
         // or block unrelated renewals/withdrawals.
         let new_intent = pending.is_none();
-        let next = if let Some(intent) = pending { intent.catalog } else { change.candidate(&self.catalog, now)? };
+        let next = if let Some(intent) = pending { intent.catalog } else { change.candidate(&self.catalog, now, &registry)? };
         encoded(&next, MAX_CATALOG_BYTES)?;
         change.stage(&self, &hook)?;
+        if let Change::Publish(release) = &change {
+            // Bind a new app ID before reserving this schema's sequence. A
+            // sibling writer cannot invalidate an unsigned pending intent.
+            self.reserve_owner(&next, release.entry.app_id(), signer)?;
+        }
         if new_intent {
             let intent = Intent { idempotency_hash, request_hash: request_hash.clone(), previous_hash: current_hash.clone(),
                 previous_sequence: self.catalog.sequence, catalog: next.clone() };
@@ -379,6 +510,24 @@ pub(crate) fn valid_date_at(value: &str, now: &str) -> Result<(), String> {
 
 fn hash(catalog: &Catalog) -> Result<String, String> {
     Ok(blake3::hash(&serde_json::to_vec(catalog).map_err(|e| e.to_string())?).to_hex().to_string())
+}
+
+fn lock_file(path: &Path) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)] {
+        use std::{os::unix::fs::OpenOptionsExt, os::fd::AsRawFd};
+        options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+        let lock = options.open(path).map_err(|e| e.to_string())?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(lock)
+    }
+    #[cfg(not(unix))] {
+        let _ = path;
+        Err("release transactions require a supported Unix operator runner".into())
+    }
 }
 
 /// Strict Gregorian YYYY-MM-DD; device freshness remains wire-compatible.
@@ -609,6 +758,40 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_v2_publish_reserves_publisher_before_v1_can_claim_the_id() {
+        for interruption in ["before-signing", "before-receipt"] {
+            let f = Fixture::new();
+            let mut modern = crate::test_bundle::Fixture::new();
+            let mut value = serde_json::to_value(&modern.manifest).unwrap();
+            value["schema"] = serde_json::json!(2);
+            value["release_number"] = serde_json::json!(1);
+            value["runtime"] = serde_json::json!({"api":"1","min_build":1,"platforms":[std::env::consts::OS]});
+            value["requires"] = serde_json::json!(["card.ui@1"]);
+            value["entrypoints"] = serde_json::json!({"ui":"page.card"});
+            value["data_schema"] = serde_json::json!(1);
+            modern.manifest = octosense_app_policy::AppManifest::parse(&value.to_string()).unwrap();
+            modern.sign();
+            let approved = approve(&modern);
+            let certificate = f.anchor.certify(&f.working.public_hex()).unwrap();
+            let signer = LocalCatalogSigner { key: &f.working, anchor_certificate: &certificate };
+            fs::create_dir(f.public.join("v2")).unwrap();
+            let modern_path = f.public.join("v2/catalog.json");
+            let result = ReleaseStore::open_format(&modern_path, &f.root.join("v2-state"), &f.anchor.public_hex(), CatalogFormat::V2)
+                .unwrap().transact(0, "modern", "2026-09-25", &signer, Change::Publish(&approved),
+                    |stage| if stage == interruption { Err("interrupted".into()) } else { Ok(()) });
+            assert!(result.is_err());
+            assert!(!modern_path.exists());
+            let old_bundle = crate::test_bundle::Fixture::new();
+            let competing = approve(&old_bundle);
+            assert!(f.open().publish(7, "competing", "2026-09-25", &signer, &competing).is_err());
+            assert_eq!(f.open().catalog().sequence, 7);
+            let retried = ReleaseStore::open_format(&modern_path, &f.root.join("v2-state"), &f.anchor.public_hex(), CatalogFormat::V2)
+                .unwrap().publish(0, "modern", "2026-09-25", &signer, &approved).unwrap();
+            assert_eq!(retried.sequence, 1);
+        }
+    }
+
+    #[test]
     fn preexisting_artifacts_cannot_be_overwritten_or_signed() {
         let f = Fixture::new();
         let bundle = crate::test_bundle::Fixture::new();
@@ -645,6 +828,17 @@ mod tests {
     fn state_inside_the_catalog_directory_is_refused() {
         let f = Fixture::new();
         assert!(ReleaseStore::open(&f.public.join("catalog.json"), &f.public.join("state"), &f.anchor.public_hex()).is_err());
+    }
+
+    #[test]
+    fn schema_writers_cannot_split_publisher_history_across_private_parents() {
+        let f = Fixture::new();
+        drop(f.open());
+        fs::create_dir(f.public.join("v2")).unwrap();
+        let other = f.root.join("other-private");
+        let attempt = ReleaseStore::open_format(&f.public.join("v2/catalog.json"), &other.join("state"),
+            &f.anchor.public_hex(), CatalogFormat::V2);
+        assert!(attempt.is_err());
     }
 
     #[test]
