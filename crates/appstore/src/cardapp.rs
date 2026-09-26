@@ -59,6 +59,8 @@ pub struct CardAppView {
     #[rust]
     prepared: Option<PreparedLaunch>,
     #[rust]
+    session: Option<octosense_app_validator::CardSession>,
+    #[rust]
     host_dir: PathBuf,
 }
 
@@ -135,16 +137,19 @@ impl CardAppView {
         settings.hosts.push(server.allowlist_entry());
         let origin = server.origin().to_string();
         self.asset_server = Some(server);
+        let session = match octosense_app_validator::CardSession::open(bundle, &origin) {
+            Ok(session) => session,
+            Err(e) => return self.refuse(cx, &format!("The app did not open: {e}")),
+        };
+        if session.needs_event_channel() { settings.capabilities.push("agent.notify".into()); }
         let splash = self.view.splash(cx, ids!(card));
         let applied = octosense_app_policy::splash_adapter::apply(&splash, cx, &settings);
         log!(
             "card: {} running under {} capability(ies), {} host(s), {} bytes of storage, {} instructions, {} bytes of heap",
             self.app_id, applied.capabilities, applied.hosts, applied.storage_quota, applied.instruction_budget, applied.memory_bytes
         );
-        match crate::card_source(bundle, &origin) {
-            Ok(source) => splash.set_text(cx, &source),
-            Err(e) => return self.refuse(cx, &format!("The app did not open: {e}")),
-        }
+        splash.set_text(cx, &session.source);
+        self.session = Some(session);
         self.prepared = prepared;
         self.running_release = Some((policy.app_id.clone(), policy.version.clone()));
         self.view.label(cx, ids!(notice)).set_text(cx, "");
@@ -154,6 +159,7 @@ impl CardAppView {
         self.running_release = None;
         self.asset_server = None;
         self.prepared = None;
+        self.session = None;
         error!("card: {reason}");
         self.view.label(cx, ids!(notice)).set_text(cx, reason);
         self.view.redraw(cx);
@@ -179,6 +185,18 @@ impl Widget for CardAppView {
             sheet.handle_event(cx, event, scope);
         } else {
             self.view.handle_event(cx, event, scope);
+        }
+        if let Event::Actions(actions) = event {
+            for action in actions {
+                if let SplashAction::Notify { event_id, payload } = action.cast() {
+                    let changed = self.session.as_mut().map(|session| session.dispatch_notify(&event_id, &payload));
+                    match changed {
+                        Some(Ok(Some(source))) => card.set_text(cx, &source),
+                        Some(Err(e)) => { self.refuse(cx, &format!("The Card event failed: {e}")); break; }
+                        _ => {}
+                    }
+                }
+            }
         }
         crate::services::pump(cx, &self.app_id, &self.host_dir, &card, &sheet);
     }

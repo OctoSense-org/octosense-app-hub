@@ -54,6 +54,7 @@ impl CardRuntime {
     }
 
     pub fn generation(&self) -> u64 { self.generation }
+    pub fn store(&self) -> &InstanceStore { &self.state }
     pub fn state(&self, key: &str, field: &str) -> Option<&Value> { self.state.get(key, field) }
 
     pub fn render(&mut self) -> Result<UiNode, String> {

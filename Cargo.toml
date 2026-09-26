@@ -37,10 +37,5 @@ makepad-studio-protocol = { path = "../makepad/platform/studio" }
 makepad-network = { path = "../makepad/platform/network" }
 makepad-wm-theme = { path = "../makepad/libs/wm_theme" }
 
-[patch."https://github.com/OctoSense-org/Octoscript-Makepad.git"]
-octoscript-makepad = { path = "../octoscript-makepad/crates/octoscript-makepad" }
-octoscript-widgets = { path = "../octoscript-makepad/crates/octoscript-widgets" }
-octoscript-node = { path = "../octoscript-makepad/crates/octoscript-node" }
-
 [patch."https://github.com/OctoSense-org/Octoscript.git"]
 octoscript-ui-l0 = { path = "../octoscript/crates/octoscript-ui-l0" }

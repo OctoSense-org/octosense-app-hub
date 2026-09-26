@@ -20,7 +20,7 @@
 //! the runtime cannot enforce yet are printed rather than assumed.
 use makepad_widgets::*;
 use octosense_app_policy::{admit_and_resolve_dir, AppPolicy, HostLimits, RefuseAllSignatures};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 app_main!(App, font_set: International);
 
@@ -52,6 +52,8 @@ pub struct App {
     mounted: bool,
     #[rust]
     assets: Option<octosense_app_policy::AssetServer>,
+    #[rust]
+    session: Option<octosense_app_validator::CardSession>,
     #[rust]
     app_id: String,
     #[rust]
@@ -139,10 +141,6 @@ fn policy_for(args: &Args) -> Result<AppPolicy, String> {
 
 /// Lower the card to isolate source: realize it, then lower it with the kit
 /// that ships in the bundle. Nothing is read from outside the bundle.
-fn card_source(bundle: &Path, asset_origin: &str) -> Result<String, String> {
-    octosense_app_validator::card_source(bundle, asset_origin)
-}
-
 /// Give every card isolate the kit vocabulary it needs to draw.
 ///
 /// An isolate starts with the standard widgets only, so a lowered L0 card,
@@ -159,8 +157,12 @@ fn register_card_vocabulary() {
     fn kit(vm: &mut ScriptVm) {
         octoscript_widgets::kit::script_mod(vm);
     }
+    fn tap(vm: &mut ScriptVm) {
+        octoscript_widgets::tap::script_mod(vm);
+    }
     register_splash_isolate_mod(design);
     register_splash_isolate_mod(kit);
+    register_splash_isolate_mod(tap);
     register_splash_isolate_mod(makepad_widgets::splash::register_agent_module);
 }
 
@@ -204,6 +206,11 @@ impl App {
         settings.hosts.push(server.allowlist_entry());
         let origin = server.origin().to_string();
         self.assets = Some(server);
+        let session = match octosense_app_validator::CardSession::open(&args.bundle, &origin) {
+            Ok(session) => session,
+            Err(e) => { error!("card-host: the card did not lower: {e}"); return; }
+        };
+        if session.needs_event_channel() { settings.capabilities.push("agent.notify".into()); }
         let splash = self.ui.splash(cx, ids!(card));
         let applied = octosense_app_policy::splash_adapter::apply(&splash, cx, &settings);
         log!(
@@ -227,10 +234,8 @@ impl App {
             }
         }
 
-        match card_source(&args.bundle, &origin) {
-            Ok(source) => splash.set_text(cx, &source),
-            Err(e) => error!("card-host: the card did not lower: {e}"),
-        }
+        splash.set_text(cx, &session.source);
+        self.session = Some(session);
     }
 }
 
@@ -252,6 +257,23 @@ impl AppMain for App {
         // Host services (a sheet the service raises, answers from its
         // workers), exactly as the Card runner does.
         let (card, sheet) = (self.ui.splash(cx, ids!(card)), self.ui.splash(cx, ids!(sheet)));
+        if let Event::Actions(actions) = event {
+            for action in actions {
+                if let SplashAction::Notify { event_id, payload } = action.cast() {
+                    let changed = self.session.as_mut().map(|session| session.dispatch_notify(&event_id, &payload));
+                    match changed {
+                        Some(Ok(Some(source))) => card.set_text(cx, &source),
+                        Some(Err(e)) => {
+                            error!("card-host: Card event failed: {e}");
+                            self.session = None;
+                            card.set_text(cx, "");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         octosense_appstore::services::pump(cx, &self.app_id, &self.host_dir, &card, &sheet);
     }
 }

@@ -13,6 +13,33 @@ fn valid_template_prepares_with_installed_host_path() {
 }
 
 #[test]
+fn simple_stateful_card_prepares_with_native_control() {
+    let mut f = Fixture::new();
+    fs::remove_dir_all(f.bundle.join("kit/native")).unwrap();
+    let template = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/l0-kit");
+    for name in ["_palette_dark.octoscript", "_palette_light.octoscript", "_derive_color.octoscript", "_derive.octoscript", "_kit.octoscript"] {
+        fs::copy(template.join(name), f.bundle.join("kit").join(name)).unwrap();
+    }
+    fs::write(f.bundle.join("page.card"), "theme light\nstate selected { shape: enum[off, on], initial: .off }\n\
+        event flip { selected: cycle(.off, .on) }\n\
+        view root Row(on_tap: flip) { TextBody(text: selected) }").unwrap();
+    f.sign();
+    let gate = f.report(None);
+    assert!(gate.passed(), "{}", gate.json());
+    let mut session = octosense_app_validator::CardSession::open(&f.bundle, "http://127.0.0.1:1/").unwrap();
+    assert!(session.source.contains("OctoscriptTap"));
+    assert!(session.source.contains("off"));
+    let channel = session.event_channel().unwrap().to_string();
+    let payload = serde_json::json!({"target":"l0:{\"e\":\"flip\",\"k\":\"root\",\"v\":\"\"}"}).to_string();
+    assert!(session.dispatch_notify("other-session", &payload).unwrap().is_none());
+    let changed = session.dispatch_notify(&channel, &payload).unwrap().unwrap();
+    assert!(changed.contains("on"), "{changed}");
+    assert!(session.dispatch_notify(&channel, &serde_json::json!({"target":"l0:{\"e\":\"unknown\",\"k\":\"root\",\"v\":\"\"}"}).to_string()).unwrap().is_none());
+    let result = Command::new(env!("CARGO_BIN_EXE_app-validator")).arg(&f.bundle).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+}
+
+#[test]
 fn script_bundle_prepares_without_a_card() {
     let mut f = Fixture::new();
     fs::remove_file(f.bundle.join("page.card")).unwrap();

@@ -992,7 +992,7 @@ dependencies = [
  "makepad-html",
  "makepad-latex-math",
  "makepad-mbtile-reader",
- "octoscript-node",
+ "octoscript-node 0.1.0 (git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=78f90f6e9e5e3b9fe4b5f5b0618fa4e93db30860)",
  "pulldown-cmark",
  "serde_json",
  "ttf-parser",
@@ -1178,6 +1178,7 @@ dependencies = [
 [[package]]
 name = "octoscript-makepad"
 version = "0.1.0"
+source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2#4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2"
 dependencies = [
  "octoscript-render",
  "octoscript-ui-l0",
@@ -1187,13 +1188,20 @@ dependencies = [
 [[package]]
 name = "octoscript-node"
 version = "0.1.0"
+source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2#4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2"
+
+[[package]]
+name = "octoscript-node"
+version = "0.1.0"
+source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=78f90f6e9e5e3b9fe4b5f5b0618fa4e93db30860#78f90f6e9e5e3b9fe4b5f5b0618fa4e93db30860"
 
 [[package]]
 name = "octoscript-render"
 version = "0.1.0"
+source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2#4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2"
 dependencies = [
  "makepad-script",
- "octoscript-node",
+ "octoscript-node 0.1.0 (git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2)",
  "serde_json",
 ]
 
@@ -1208,6 +1216,7 @@ dependencies = [
 [[package]]
 name = "octoscript-widgets"
 version = "0.1.0"
+source = "git+https://github.com/OctoSense-org/Octoscript-Makepad.git?rev=4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2#4de95e1d25b556b8b2a123ec32e3a1bbad7edbd2"
 dependencies = [
  "makepad-widgets",
  "serde_json",
@@ -1281,9 +1290,12 @@ dependencies = [
  "blake3",
  "makepad-widgets",
  "octoscript-makepad",
+ "octoscript-render",
  "octoscript-widgets",
  "octosense-app-hub",
  "octosense-app-policy",
+ "octosense-app-runtime",
+ "rand_core 0.9.5",
  "serde_json",
 ]
 

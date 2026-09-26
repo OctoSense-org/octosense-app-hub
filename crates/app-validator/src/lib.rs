@@ -4,9 +4,30 @@ use std::path::Path;
 use octosense_app_hub::admission::{read_text, MAX_TEXT_BYTES};
 
 pub fn card_source(bundle: &Path, asset_origin: &str) -> Result<String, String> {
+    Ok(CardSession::open(bundle, asset_origin)?.source)
+}
+
+/// One mounted Card and its verified, host-owned event channel. Script and
+/// native-kit bundles keep their existing source path; portable L0 controls
+/// use the shared state machine and can only change state through this session.
+pub struct CardSession {
+    pub source: String,
+    runtime: Option<octosense_app_runtime::CardRuntime>,
+    channel: Option<String>,
+    card: String,
+    data: serde_json::Value,
+    kit: std::path::PathBuf,
+    bundle: std::path::PathBuf,
+    asset_origin: String,
+}
+
+impl CardSession {
+    pub fn open(bundle: &Path, asset_origin: &str) -> Result<Self, String> {
     if bundle.join(octosense_app_policy::SCRIPT_ENTRY).is_file() {
         let source = read_text(&bundle.join(octosense_app_policy::SCRIPT_ENTRY), MAX_TEXT_BYTES)?;
-        return Ok(source.replace(octosense_app_policy::ASSETS_PLACEHOLDER, asset_origin.trim_end_matches('/')));
+        return Ok(Self { source: source.replace(octosense_app_policy::ASSETS_PLACEHOLDER, asset_origin.trim_end_matches('/')),
+            runtime: None, channel: None, card: String::new(), data: serde_json::Value::Null,
+            kit: bundle.join("kit"), bundle: bundle.into(), asset_origin: asset_origin.into() });
     }
     let card = read_text(&bundle.join("page.card"), 256 * 1024)?;
     let data_path = bundle.join("page.data.json");
@@ -14,24 +35,64 @@ pub fn card_source(bundle: &Path, asset_origin: &str) -> Result<String, String> 
     let mut data: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("page.data.json: {e}"))?;
     octosense_app_policy::rewrite_assets(&mut data, asset_origin);
     let prepared = octoscript_makepad::l0::prepare(&card, &data, &bundle.join("kit"))?;
+    validate_resources(&prepared.tree, bundle, asset_origin)?;
+    let runtime = if prepared.native_components { None } else { Some(octosense_app_runtime::CardRuntime::new(&card, data.clone())?) };
+    let channel = if runtime.is_some() {
+        let mut nonce = [0u8; 16];
+        rand_core::TryRngCore::try_fill_bytes(&mut rand_core::OsRng, &mut nonce).map_err(|e| format!("Card event channel: {e}"))?;
+        Some(format!("octosense-card-runtime:{}", nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+    } else { None };
+    let ui = if let Some(channel) = &channel {
+        octoscript_makepad::to_makepad_l0_ui_with_events(&prepared.tree, channel)
+    } else { octoscript_makepad::design::to_makepad_ui(&prepared.tree)? };
+    Ok(Self { source: format!("width:Fill height:Fill flow:Overlay {ui}"), runtime, channel,
+        card, data, kit: bundle.join("kit"), bundle: bundle.into(), asset_origin: asset_origin.into() })
+    }
+
+    pub fn needs_event_channel(&self) -> bool { self.runtime.is_some() }
+    pub fn event_channel(&self) -> Option<&str> { self.channel.as_deref() }
+
+    /// Return updated Splash source only for a declared event on this mounted
+    /// generation. Other notifications are left to the host's normal handler.
+    pub fn dispatch_notify(&mut self, event_id: &str, payload: &str) -> Result<Option<String>, String> {
+        let Some(runtime) = &mut self.runtime else { return Ok(None) };
+        if Some(event_id) != self.channel.as_deref() { return Ok(None); }
+        let message: serde_json::Value = serde_json::from_str(payload).map_err(|e| format!("Card event payload: {e}"))?;
+        let target = message.get("target").and_then(|v| v.as_str()).and_then(|v| v.strip_prefix("l0:"))
+            .ok_or("Card event target is missing")?;
+        let target: serde_json::Value = serde_json::from_str(target).map_err(|e| format!("Card event target: {e}"))?;
+        let key = target.get("k").and_then(|v| v.as_str()).ok_or("Card event key is missing")?;
+        let event = target.get("e").and_then(|v| v.as_str()).ok_or("Card event name is missing")?;
+        let value = target.get("v").cloned();
+        let outcome = runtime.dispatch_native(octosense_app_runtime::NativeEvent::new(runtime.generation(), key, event, value))?;
+        if !outcome.applied { return Ok(None); }
+        let prepared = octoscript_makepad::l0::prepare_with_state(&self.card, &self.data, &self.kit, runtime.store())?;
+        validate_resources(&prepared.tree, &self.bundle, &self.asset_origin)?;
+        let ui = octoscript_makepad::to_makepad_l0_ui_with_events(&prepared.tree, event_id);
+        let source = format!("width:Fill height:Fill flow:Overlay {ui}");
+        self.source = source.clone();
+        Ok(Some(source))
+    }
+}
+
+fn validate_resources(tree: &octoscript_render::UiNode, bundle: &Path, asset_origin: &str) -> Result<(), String> {
     // Inspect the resolved renderer nodes, so properties hidden behind Card
     // bindings/tokens receive the same checks as literal asset paths.
-    let mut nodes = vec![&prepared.tree];
+    let mut nodes = vec![tree];
     while let Some(node) = nodes.pop() {
         if let Some(source) = &node.attrs.src {
             let relative = source.strip_prefix(asset_origin).ok_or_else(|| format!("resource must use this bundle's asset origin: {source}"))?;
             octosense_app_hub::admission::safe_relative(relative)?;
             if !bundle.join(relative).is_file() { return Err(format!("missing resolved resource: {relative}")); }
         }
-        if let Some(font) = &node.attrs.font_src {
+        if let Some(font) = node.attrs.font_src.as_ref().filter(|font| !font.is_empty()) {
             if font != "makepad_widgets:resources/Inter.ttf" {
                 return Err(format!("font {font} is not supported by the installed Card resource loader; use makepad_widgets:resources/Inter.ttf"));
             }
         }
         nodes.extend(&node.children);
     }
-    let ui = octoscript_makepad::design::to_makepad_ui(&prepared.tree)?;
-    Ok(format!("width:Fill height:Fill flow:Overlay {ui}"))
+    Ok(())
 }
 
 pub fn validate_native(bundle: &Path) -> Result<octosense_app_hub::runtime::RuntimeReport, String> {
@@ -58,12 +119,14 @@ pub fn validate_native(bundle: &Path) -> Result<octosense_app_hub::runtime::Runt
     // No asset server or network grant is needed for widget construction.
     // Actual image decoding was checked above; visual/device quality remains
     // a separate review step.
-    let source = card_source(bundle, "http://127.0.0.1:1/")?;
+    let session = CardSession::open(bundle, "http://127.0.0.1:1/")?;
+    let source = &session.source;
     let mut cx = Cx::new(Box::new(|_, _| {}));
     cx.init_cx_os();
     cx.with_vm(makepad_widgets::script_mod);
     widget_async::register_splash_isolate_mod(|vm| { octoscript_widgets::design::script_mod(vm); });
     widget_async::register_splash_isolate_mod(|vm| { octoscript_widgets::kit::script_mod(vm); });
+    widget_async::register_splash_isolate_mod(|vm| { octoscript_widgets::tap::script_mod(vm); });
     widget_async::register_splash_isolate_mod(makepad_widgets::splash::register_agent_module);
     let root = cx.with_vm(|vm| {
         let value = script_eval!(vm, { use mod.widgets.* Splash {} });
@@ -79,8 +142,10 @@ pub fn validate_native(bundle: &Path) -> Result<octosense_app_hub::runtime::Runt
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos()));
     std::fs::create_dir(&jail).map_err(|e| e.to_string())?;
     let jail = Jail(jail);
-    octosense_app_policy::splash_adapter::apply(&splash, &mut cx, &policy.isolate_settings(&jail.0));
-    splash.set_text(&mut cx, &source);
+    let mut settings = policy.isolate_settings(&jail.0);
+    if session.needs_event_channel() { settings.capabilities.push("agent.notify".into()); }
+    octosense_app_policy::splash_adapter::apply(&splash, &mut cx, &settings);
+    splash.set_text(&mut cx, source);
     let loaded = {
         let mut inner = splash.borrow_mut().ok_or("native Splash was not constructed")?;
         !inner.view.children.is_empty() && inner.isolate_heap_key(&mut cx).is_some_and(splash_policy::may_run)

@@ -8,12 +8,16 @@ generation to each instance, so a response from a closed instance cannot
 change a replacement instance. Payloads, Card source, data and realization
 work have explicit limits. A failed render leaves the previous state intact.
 
-The current API returns the rendered tree and any declared durable writes or
-stale sources to a host; it does not execute effects itself. The installed
-Card host, reference host and native validator do not use this crate yet.
-The next slice must map actual Makepad widget actions to the declared Card
-keys, use this same runtime in all three hosts, and prove a real native tap
-changes displayed text. Persistence, asynchronous services and lifecycle
-budgets follow in the remaining Plan 06 tasks. Until that integration lands,
-`card.ui@1` remains a static Card rendering contract; `app.logic@1` is not
-advertised.
+The installed Card host, reference host and native validator now share a
+`CardSession`. Portable L0 controls lower to native Makepad widgets. Their
+callbacks use a random, host-owned channel and the session checks the current
+Card tree before applying a declared transition and rebuilding the UI. The
+channel grant is limited to `agent.notify`; it does not grant the app's agent
+family or network access. Native-kit and existing script bundles retain their
+prior rendering path.
+
+The native validator loads the actual widget source and tests a state change
+through the same session API. A physical tap in the installed shell has not
+yet been captured as device evidence. State is currently in memory: durable
+storage, asynchronous effects, lifecycle budgets and explicit `app.logic@1`
+entrypoints remain Plan 06 work. `app.logic@1` is not advertised yet.

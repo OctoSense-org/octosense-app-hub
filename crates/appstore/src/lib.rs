@@ -452,8 +452,12 @@ pub(crate) fn register_card_vocabulary() {
         fn kit(vm: &mut ScriptVm) {
             octoscript_widgets::kit::script_mod(vm);
         }
+        fn tap(vm: &mut ScriptVm) {
+            octoscript_widgets::tap::script_mod(vm);
+        }
         makepad_widgets::widget_async::register_splash_isolate_mod(design);
         makepad_widgets::widget_async::register_splash_isolate_mod(kit);
+        makepad_widgets::widget_async::register_splash_isolate_mod(tap);
         // `sys`: places, routes, weather and the other live-data helpers a
         // script app reads, every fetch held to the app's host list, the
         // device's location to its `location` grant. It also carries
