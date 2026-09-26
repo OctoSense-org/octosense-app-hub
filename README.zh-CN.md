@@ -11,6 +11,8 @@
 | 第一方系统应用（新闻、相册、地图、相机、邮件） | [OctoSense-System-Apps](https://github.com/OctoSense-org/OctoSense-System-Apps) |
 | 应用包格式、准入检查、签名、提交与商店 | 本仓库 |
 
+**要开发应用？** 请从 [OctoSense-org 主页](https://github.com/OctoSense-org)的“请按顺序先阅读”列表开始（先读 OctoScript-App-Design-Flow 的 `AGENTS.md`，再读其 `docs/QUICKSTART.md`）。你只需要把本仓库作为兄弟目录克隆下来，用于构建 `hub` 和 `card-host`，以及提交应用（在这里开 issue，见[提交](docs/PUBLISHING.md#submitting)）。不要修改 `catalog.json`、`index/` 或 `artifacts/`。
+
 | 路径 | 说明 |
 | --- | --- |
 | `catalog.json` | 签名目录。商店在展示任何内容之前，先用下方的信任锚验证它。 |
