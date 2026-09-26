@@ -31,4 +31,6 @@ Physical tap/device evidence, migration across incompatible Card schemas,
 asynchronous effects, lifecycle budgets and explicit `app.logic@1` entrypoints
 remain Plan 06 work. Snapshot usage is capped independently of the isolate's
 file-jail usage, so combined quota accounting also remains. `app.logic@1` is
-not advertised yet.
+not advertised yet. A Card transition that requires a durable collection write
+or refetches an invalidated source is refused without changing state until the
+host effect broker can settle that work; it does not appear to succeed locally.

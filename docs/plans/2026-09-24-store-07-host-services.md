@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, serde/JSON, the existing Hub policy/client, Makepad/Octoscript where applicable; additional service/storage adapters follow the [shared design](2026-09-24-app-store-design.md).
 
-**Status:** Planned; no feature implementation is claimed. **Priority:** P0. **Phase:** B — Application platform. **Relative size:** L (complexity, not a delivery-date estimate).
+**Status:** In progress. The existing Splash request bridge is drained by installed/reference hosts; bounded pending replies, timeouts and close cancellation are being added. Storage/network/device conformance and a versioned support matrix remain. **Priority:** P0. **Phase:** B — Application platform. **Relative size:** L (complexity, not a delivery-date estimate).
 
 **Prerequisites:** [05 — Versioned runtime contracts and release compatibility](2026-09-24-store-05-runtime-compatibility.md); [06 — Card application lifecycle, state and effects](2026-09-24-store-06-card-application-runtime.md)
 

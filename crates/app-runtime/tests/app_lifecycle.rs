@@ -42,3 +42,31 @@ fn saved_note_survives_process_restart() {
     assert!(contains_text(&restarted.render().unwrap(), "on"));
     assert!(!restarted.dispatch_native(NativeEvent::new(first.generation(), "root", "flip", None)).unwrap().applied);
 }
+
+#[test]
+fn unsupported_durable_effect_does_not_commit_state() {
+    let card = "source movers sys.movers(count: 5, fields: [ticker, name])\n\
+        source watch sys.watchlist(fields: [ticker, name])\n\
+        event keep { watch: append($value) }\n\
+        view root Surface { for m, i in movers key m.ticker {\n\
+            Row(on_tap: keep, value: m.ticker) { TextBody(text: m.ticker) }\n\
+        }}";
+    let mut runtime = CardRuntime::new(card, serde_json::json!({"movers":[{"ticker":"AAA","name":"Alpha"}],"watch":[]})).unwrap_or_else(|e| {
+        panic!("{e}: {:?}", octoscript_ui_l0::check_ui_l0(card).diagnostics)
+    });
+    let before = runtime.snapshot_bytes().unwrap();
+    fn tap(node: &octoscript_ui_l0::UiNode) -> Option<(String, serde_json::Value)> {
+        let event = node.args.iter().find(|(name, _)| name == "on_tap");
+        if matches!(event, Some((_, octoscript_ui_l0::NodeValue::Event(name))) if name == "keep") {
+            let value = node.args.iter().find(|(name, _)| name == "value")?.1.clone();
+            if let octoscript_ui_l0::NodeValue::Text(value) = value {
+                return Some((node.key.clone(), value.into()));
+            }
+        }
+        node.children.iter().find_map(tap)
+    }
+    let (key, value) = tap(&runtime.render().unwrap()).unwrap();
+    let event = NativeEvent::new(runtime.generation(), &key, "keep", Some(value));
+    assert!(runtime.dispatch_native(event).is_err());
+    assert_eq!(runtime.snapshot_bytes().unwrap(), before);
+}

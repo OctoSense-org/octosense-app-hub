@@ -250,6 +250,12 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if matches!(event, Event::Shutdown) {
+            let card = self.ui.splash(cx, ids!(card));
+            if let Some(heap) = card.borrow_mut().and_then(|mut s| s.isolate_heap_key(cx)) {
+                octosense_appstore::services::cancel_heap(heap);
+            }
+        }
         if !self.mounted {
             self.mounted = true;
             register_card_vocabulary();

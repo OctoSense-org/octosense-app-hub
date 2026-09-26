@@ -27,8 +27,10 @@
 use makepad_widgets::makepad_platform::SignalToUI;
 use makepad_widgets::{Cx, SplashRef};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// One request from an app (or from a service's sheet over it).
 #[derive(Clone, Debug)]
@@ -41,6 +43,8 @@ pub struct ServiceCall {
     /// It came from the service's own sheet, which the person typed into,
     /// not from the app.
     pub from_sheet: bool,
+    /// Host-owned surface permission. A background Card cannot raise a sheet.
+    pub may_prompt: bool,
     /// A directory only the host can reach, for the service's own state
     /// (accounts, secrets, caches): outside every app's jail.
     pub host_dir: PathBuf,
@@ -61,13 +65,61 @@ pub struct Replier {
 }
 
 static REPLIES: Mutex<Vec<(usize, u64, Result<String, String>)>> = Mutex::new(Vec::new());
+static PENDING: OnceLock<Mutex<HashMap<(usize, u64), Instant>>> = OnceLock::new();
+static TIMER: OnceLock<()> = OnceLock::new();
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PENDING: usize = 256;
+const MAX_PER_HEAP: usize = 32;
+const MAX_REPLY_BYTES: usize = 1_048_576;
+
+fn pending() -> &'static Mutex<HashMap<(usize, u64), Instant>> {
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn queue_reply(heap_key: usize, req_id: u64, result: Result<String, String>) {
+    REPLIES.lock().unwrap().push((heap_key, req_id, result));
+    SignalToUI::set_ui_signal();
+}
+
+fn expire_pending_at(now: Instant) {
+    let expired = {
+        let mut pending = pending().lock().unwrap();
+        let expired: Vec<_> = pending.iter().filter(|(_, deadline)| **deadline <= now).map(|(key, _)| *key).collect();
+        for key in &expired { pending.remove(key); }
+        expired
+    };
+    for (heap, req) in expired { queue_reply(heap, req, Err("host service timed out".into())); }
+}
+
+fn start_timeout_worker() {
+    TIMER.get_or_init(|| {
+        std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_millis(250));
+            expire_pending_at(Instant::now());
+        });
+    });
+}
 
 impl Replier {
     pub fn send(self, result: Result<Value, String>) {
-        let result = result.map(|value| value.to_string());
-        REPLIES.lock().unwrap().push((self.heap_key, self.req_id, result));
-        SignalToUI::set_ui_signal();
+        let deadline = pending().lock().unwrap().remove(&(self.heap_key, self.req_id));
+        let Some(deadline) = deadline else { return; };
+        if Instant::now() >= deadline {
+            queue_reply(self.heap_key, self.req_id, Err("host service timed out".into()));
+            return;
+        }
+        let result = result.map(|value| value.to_string()).and_then(|json| {
+            if json.len() > MAX_REPLY_BYTES { Err("host service response exceeds 1 MiB".into()) } else { Ok(json) }
+        });
+        queue_reply(self.heap_key, self.req_id, result);
     }
+}
+
+/// Cancel work owned by an isolate that is closing. Late worker answers are
+/// discarded instead of being delivered to a replacement Card.
+pub fn cancel_heap(heap_key: usize) {
+    pending().lock().unwrap().retain(|(heap, _), _| *heap != heap_key);
+    REPLIES.lock().unwrap().retain(|(heap, _, _)| *heap != heap_key);
 }
 
 /// What a service may ask of the runner that called it.
@@ -99,9 +151,27 @@ pub fn has_service(family: &str) -> bool {
     SERVICES.lock().unwrap().iter().any(|s| s.family() == family)
 }
 
+fn parse_request(service: &str, args_json: &str) -> Result<Value, String> {
+    if service.len() > 256 || !service.contains('.') {
+        return Err("host service name is invalid or too long".into());
+    }
+    if args_json.len() > 65_536 { return Err("host request arguments exceed 64 KiB".into()); }
+    serde_json::from_str(args_json).map_err(|e| format!("host request arguments are invalid JSON: {e}"))
+}
+
 /// Hand one request to the service for its family. No service: the app hears
 /// so, rather than waiting forever.
 pub fn dispatch(call: ServiceCall, heap_key: usize, req_id: u64, host: &mut dyn ServiceHost) {
+    {
+        let mut pending = pending().lock().unwrap();
+        if pending.len() >= MAX_PENDING || pending.keys().filter(|(heap, _)| *heap == heap_key).count() >= MAX_PER_HEAP {
+            drop(pending);
+            queue_reply(heap_key, req_id, Err("too many pending host requests".into()));
+            return;
+        }
+        pending.insert((heap_key, req_id), Instant::now() + REQUEST_TIMEOUT);
+    }
+    start_timeout_worker();
     let reply = Replier { heap_key, req_id };
     let family = call.service.split('.').next().unwrap_or("").to_string();
     // What the person types on a sheet reaches only the sheet's methods,
@@ -132,10 +202,16 @@ pub fn take_replies_for(heap_keys: &[usize]) -> Vec<(usize, u64, Result<String, 
 #[derive(Default)]
 struct SheetOps {
     change: Option<Option<String>>,
+    may_prompt: bool,
+    refusal: Option<Replier>,
 }
 
 impl ServiceHost for SheetOps {
     fn open_sheet(&mut self, body: String) {
+        if !self.may_prompt {
+            if let Some(reply) = self.refusal.take() { reply.send(Err("this surface cannot raise a prompt".into())); }
+            return;
+        }
         self.change = Some(Some(body));
     }
     fn close_sheet(&mut self) {
@@ -204,14 +280,24 @@ pub fn pump(cx: &mut Cx, app_id: &str, host_dir: &std::path::Path, card: &Splash
         return;
     }
     for request in makepad_widgets::splash_host::take_splash_host_requests_for(&heaps) {
+        if let Err(reason) = makepad_widgets::splash_policy::service_allowed(request.heap_key, &request.service) {
+            queue_reply(request.heap_key, request.req_id, Err(reason));
+            continue;
+        }
+        let args = match parse_request(&request.service, &request.args_json) {
+            Ok(args) => args,
+            Err(e) => { queue_reply(request.heap_key, request.req_id, Err(e)); continue; }
+        };
         let call = ServiceCall {
             app_id: app_id.to_string(),
             service: request.service.clone(),
-            args: serde_json::from_str(&request.args_json).unwrap_or(Value::Null),
+            args,
             from_sheet: Some(request.heap_key) == sheet_heap,
+            may_prompt: request.may_prompt,
             host_dir: host_dir.to_path_buf(),
         };
-        let mut ops = SheetOps::default();
+        let mut ops = SheetOps { change: None, may_prompt: request.may_prompt,
+            refusal: Some(Replier { heap_key: request.heap_key, req_id: request.req_id }) };
         dispatch(call, request.heap_key, request.req_id, &mut ops);
         if let Some(change) = ops.change {
             apply_sheet(cx, sheet, change);
@@ -238,6 +324,7 @@ pub fn pump(cx: &mut Cx, app_id: &str, host_dir: &std::path::Path, card: &Splash
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     struct Echo;
     impl HostService for Echo {
@@ -266,7 +353,8 @@ mod tests {
     }
 
     fn call(service: &str) -> ServiceCall {
-        ServiceCall { app_id: "os.demo".into(), service: service.into(), args: Value::Null, from_sheet: false, host_dir: std::env::temp_dir() }
+        ServiceCall { app_id: "os.demo".into(), service: service.into(), args: Value::Null, from_sheet: false,
+            may_prompt: true, host_dir: std::env::temp_dir() }
     }
 
     #[test]
@@ -294,5 +382,53 @@ mod tests {
         from_sheet.from_sheet = true;
         dispatch(from_sheet, 7012, 1, &mut host);
         assert!(take_replies_for(&[7012])[0].2.as_ref().unwrap().contains("\"sheet\":true"));
+    }
+
+    struct Deferred(Arc<Mutex<Option<Replier>>>);
+    impl HostService for Deferred {
+        fn family(&self) -> &'static str { "deferred" }
+        fn call(&mut self, _call: ServiceCall, reply: Replier, _host: &mut dyn ServiceHost) {
+            *self.0.lock().unwrap() = Some(reply);
+        }
+    }
+
+    #[test]
+    fn timed_out_or_closed_requests_cannot_deliver_late_answers() {
+        let held = Arc::new(Mutex::new(None));
+        register_host_service(Box::new(Deferred(held.clone())));
+        let mut host = Host::default();
+        dispatch(call("deferred.read"), 7091, 1, &mut host);
+        assert!(take_replies_for(&[7091]).is_empty());
+        *pending().lock().unwrap().get_mut(&(7091, 1)).unwrap() = Instant::now() - Duration::from_secs(1);
+        expire_pending_at(Instant::now());
+        let timeout = take_replies_for(&[7091]);
+        assert_eq!(timeout.len(), 1);
+        assert!(timeout[0].2.as_ref().unwrap_err().contains("timed out"));
+        held.lock().unwrap().take().unwrap().send(Ok(Value::Null));
+        assert!(take_replies_for(&[7091]).is_empty());
+
+        dispatch(call("deferred.read"), 7092, 2, &mut host);
+        cancel_heap(7092);
+        held.lock().unwrap().take().unwrap().send(Ok(Value::Null));
+        assert!(take_replies_for(&[7092]).is_empty());
+    }
+
+    #[test]
+    fn background_surface_cannot_raise_a_host_sheet() {
+        register_host_service(Box::new(Echo));
+        let mut ops = SheetOps { change: None, may_prompt: false,
+            refusal: Some(Replier { heap_key: 7093, req_id: 3 }) };
+        dispatch(call("echo.sheet"), 7093, 3, &mut ops);
+        assert!(ops.change.is_none());
+        let reply = take_replies_for(&[7093]);
+        assert_eq!(reply.len(), 1);
+        assert!(reply[0].2.as_ref().unwrap_err().contains("cannot raise a prompt"));
+    }
+
+    #[test]
+    fn malformed_or_unbounded_host_requests_are_actionable() {
+        assert!(parse_request("mail.list", "{").unwrap_err().contains("invalid JSON"));
+        assert!(parse_request("mail.list", &"x".repeat(65_537)).unwrap_err().contains("64 KiB"));
+        assert!(parse_request("mail", "{}").unwrap_err().contains("name"));
     }
 }

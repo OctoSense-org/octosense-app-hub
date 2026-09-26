@@ -96,6 +96,12 @@ impl CardRuntime {
         let outcome = octoscript_ui_l0::dispatch_reporting_with_origin(
             &self.source, &mut next, &event.key, &event.event, event.payload.as_ref(), &self.data, origin);
         if !outcome.applied { return Ok(DispatchResult::ignored()); }
+        // A reported collection write or invalidated source is an obligation
+        // on the host. Until the service broker can settle it, refusing the
+        // whole transition is safer than showing a change that never lands.
+        if !outcome.writes.is_empty() || !outcome.stale.is_empty() {
+            return Err("Card event requires a host effect that this runtime does not support yet".into());
+        }
         let rendered = octoscript_ui_l0::realize_with_state(&self.source, &self.data, &next, RealizeLimits::default());
         rendered.complete_root()?;
         for (field, value) in &rendered.captured { next.set_cell("@card", field, value.clone()); }

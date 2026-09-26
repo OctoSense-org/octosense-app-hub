@@ -158,6 +158,10 @@ impl CardAppView {
     }
 
     fn refuse(&mut self, cx: &mut Cx, reason: &str) {
+        let splash = self.view.splash(cx, ids!(card));
+        if let Some(heap) = splash.borrow_mut().and_then(|mut s| s.isolate_heap_key(cx)) {
+            crate::services::cancel_heap(heap);
+        }
         self.running_release = None;
         self.asset_server = None;
         self.prepared = None;
@@ -253,6 +257,7 @@ impl AppModule for CardModule {
                 let splash = closing.splash(cx, ids!(card));
                 let heap = splash.borrow_mut().and_then(|mut s| s.isolate_heap_key(cx));
                 if let Some(heap) = heap {
+                    crate::services::cancel_heap(heap);
                     makepad_widgets::camera_preview::release_isolate_devices(cx, heap);
                 }
             }),
