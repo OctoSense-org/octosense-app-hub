@@ -14,6 +14,8 @@ publisher's repository.
 | The first-party system apps (News, Photos, Maps, Camera, Mail) | [OctoSense-System-Apps](https://github.com/OctoSense-org/OctoSense-System-Apps) |
 | The bundle format, the gate, signing, submission and the store | this repository |
 
+**Building an app?** Start at the [OctoSense-org profile](https://github.com/OctoSense-org)'s "read these first" list (OctoScript-App-Design-Flow's `AGENTS.md`, then its `docs/QUICKSTART.md`). You need this repository only as a sibling checkout to build `hub` and `card-host`, and to submit (an issue here, see [Submitting](docs/PUBLISHING.md#submitting)). Clone it; do not edit `catalog.json`, `index/` or `artifacts/`.
+
 | Path | What it is |
 | --- | --- |
 | `catalog.json` | The signed catalog. Stores verify it against the anchor below before showing anything. |
