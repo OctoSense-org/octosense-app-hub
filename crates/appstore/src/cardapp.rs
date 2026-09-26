@@ -27,10 +27,16 @@ script_mod! {
     use mod.prelude.widgets.*
 
     mod.widgets.CardAppView = set_type_default() do #(CardAppView::register_widget(vm)) {
-        width: Fill height: Fill flow: Down
+        width: Fill height: Fill flow: Overlay
         show_bg: true draw_bg.color: #fff
-        notice := Label { width: Fill text: "" draw_text.color: #b00 draw_text.text_style.font_size: 12 margin: 16 }
-        card := Splash { width: Fill height: Fill }
+        body := View { width: Fill height: Fill flow: Down
+            notice := Label { width: Fill text: "" draw_text.color: #b00 draw_text.text_style.font_size: 12 margin: 16 }
+            card := Splash { width: Fill height: Fill }
+        }
+        // A host service's sheet over the app (services.rs): its own isolate,
+        // under no app's policy, where the person types what the app must
+        // never see.
+        sheet := Splash { visible: false width: Fill height: Fill }
     }
 }
 
@@ -52,6 +58,8 @@ pub struct CardAppView {
     catalog_guard: Option<CatalogGuard>,
     #[rust]
     prepared: Option<PreparedLaunch>,
+    #[rust]
+    host_dir: PathBuf,
 }
 
 impl CardAppView {
@@ -59,14 +67,24 @@ impl CardAppView {
         self.running_release.clone()
     }
 
-    /// A host may know about a newer verified catalog that could not yet be
-    /// saved. Let it reject stale disk state before any app code is loaded.
+    /// Reject stale disk state before any installed app code is loaded.
     pub fn set_catalog_guard(&mut self, guard: Box<dyn Fn(u64) -> Result<(), String>>) {
         self.catalog_guard = Some(guard);
     }
 
     fn start(&mut self, cx: &mut Cx) {
         let root = crate::data_root(cx);
+        // `.host` can never be an app id, so the host service keeps its own
+        // files separate from each contained app's jail.
+        self.host_dir = root.join(".host");
+        if let Some(app) = crate::system::system_app(&self.app_id) {
+            match crate::system::prepare(&root, &app) {
+                Ok((bundle, policy)) => self.mount(cx, &policy, &bundle, app.assets, None),
+                Err(e) => self.refuse(cx, &format!("Cannot open {}: {e}", app.name)),
+            }
+            return;
+        }
+
         let anchor = std::env::var("OCTOSENSE_HUB_ANCHOR").unwrap_or_else(|_| crate::DEFAULT_ANCHOR.to_string());
         let app_id = self.app_id.clone();
         let (tx, rx) = mpsc::channel();
@@ -74,7 +92,8 @@ impl CardAppView {
         match cx.thread_spawner().spawn_worker(ThreadOptions::default(), move || {
             let result = (|| {
                 let mut store = Store::new(&anchor, &root, HostLimits::default());
-                let catalog = std::fs::read_to_string(root.join("catalog.json")).map_err(|e| format!("no cached catalog: {e}"))?;
+                let catalog = std::fs::read_to_string(root.join("catalog.json"))
+                    .map_err(|e| format!("no cached catalog: {e}"))?;
                 store.accept_catalog(&catalog)?;
                 store.prepare_launch(&app_id)
             })();
@@ -88,10 +107,9 @@ impl CardAppView {
 
     fn finish_start(&mut self, cx: &mut Cx, prepared: PreparedLaunch) {
         let root = crate::data_root(cx);
-        let policy = &prepared.policy;
         let anchor = std::env::var("OCTOSENSE_HUB_ANCHOR").unwrap_or_else(|_| crate::DEFAULT_ANCHOR.to_string());
-        // The catalog may have refreshed while hashing ran. Recheck only
-        // authenticated metadata here; bundle hashing stays on the worker.
+        // Hashing ran on the worker. Recheck authenticated metadata on the UI
+        // thread before loading the already-owned code snapshot.
         let current = (|| {
             let mut store = Store::new(&anchor, &root, HostLimits::default());
             store.accept_catalog(&std::fs::read_to_string(root.join("catalog.json")).map_err(|e| e.to_string())?)?;
@@ -99,16 +117,19 @@ impl CardAppView {
             store.validate_prepared_launch(&prepared)
         })();
         if let Err(e) = current { return self.refuse(cx, &format!("Cannot open: {e}")); }
-        // Remember the actual running version, so a withdrawal for another
-        // version never closes this instance.
-        self.running_release = Some((policy.app_id.clone(), policy.version.clone()));
-        self.view.label(cx, ids!(notice)).set_text(cx, "");
+        let policy = prepared.policy.clone();
+        let bundle = prepared.bundle().to_path_buf();
+        self.mount(cx, &policy, &bundle, &[] as octosense_app_policy::StaticAssets, Some(prepared));
+    }
+
+    fn mount(&mut self, cx: &mut Cx, policy: &octosense_app_policy::AppPolicy, bundle: &std::path::Path,
+             statics: octosense_app_policy::StaticAssets, prepared: Option<PreparedLaunch>) {
+        let root = crate::data_root(cx);
         let mut settings = policy.isolate_settings(&root);
         if let Err(e) = std::fs::create_dir_all(&settings.jail_root) {
             return self.refuse(cx, &format!("Cannot make the app's storage: {e}"));
         }
-        let bundle = prepared.bundle();
-        let server = match octosense_app_policy::AssetServer::start(&bundle) {
+        let server = match octosense_app_policy::AssetServer::start_with_static(bundle, statics) {
             Ok(server) => server,
             Err(e) => return self.refuse(cx, &format!("Cannot serve the app's artwork: {e}")),
         };
@@ -121,11 +142,13 @@ impl CardAppView {
             "card: {} running under {} capability(ies), {} host(s), {} bytes of storage, {} instructions, {} bytes of heap",
             self.app_id, applied.capabilities, applied.hosts, applied.storage_quota, applied.instruction_budget, applied.memory_bytes
         );
-        match crate::card_source(&bundle, &origin) {
+        match crate::card_source(bundle, &origin) {
             Ok(source) => splash.set_text(cx, &source),
             Err(e) => return self.refuse(cx, &format!("The app did not open: {e}")),
         }
-        self.prepared = Some(prepared);
+        self.prepared = prepared;
+        self.running_release = Some((policy.app_id.clone(), policy.version.clone()));
+        self.view.label(cx, ids!(notice)).set_text(cx, "");
     }
 
     fn refuse(&mut self, cx: &mut Cx, reason: &str) {
@@ -151,7 +174,14 @@ impl Widget for CardAppView {
                 Err(e) => self.refuse(cx, &format!("Cannot open: {e}")),
             }
         }
-        self.view.handle_event(cx, event, scope);
+        let (card, sheet) = (self.view.splash(cx, ids!(card)), self.view.splash(cx, ids!(sheet)));
+        let sheet_up = sheet.borrow().map(|s| s.view.visible).unwrap_or(false);
+        if sheet_up && event.requires_visibility() {
+            sheet.handle_event(cx, event, scope);
+        } else {
+            self.view.handle_event(cx, event, scope);
+        }
+        crate::services::pump(cx, &self.app_id, &self.host_dir, &card, &sheet);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -189,7 +219,21 @@ impl AppModule for CardModule {
         if let Some(mut view) = root.borrow_mut::<CardAppView>() {
             view.app_id = open.text("app").unwrap_or_default().to_string();
         }
-        InstanceParts { root, executor: Box::new(CardExecutor), shutdown: Box::new(|_vm| {}) }
+        let closing = root.clone();
+        InstanceParts {
+            root,
+            executor: Box::new(CardExecutor),
+            // The camera and any web views the app opened go when the app
+            // does, not whenever its isolate is next collected.
+            shutdown: Box::new(move |vm| {
+                let cx = vm.cx_mut();
+                let splash = closing.splash(cx, ids!(card));
+                let heap = splash.borrow_mut().and_then(|mut s| s.isolate_heap_key(cx));
+                if let Some(heap) = heap {
+                    makepad_widgets::camera_preview::release_isolate_devices(cx, heap);
+                }
+            }),
+        }
     }
 }
 

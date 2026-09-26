@@ -85,6 +85,11 @@ impl Entry {
                 "location" => "Use your location".to_string(),
                 "camera" => "Use the camera".to_string(),
                 "clipboard" => "Use the clipboard".to_string(),
+                "images" => "Show pictures from any website".to_string(),
+                "web" => "Open web pages in a browser view".to_string(),
+                "microphone" => "Use the microphone".to_string(),
+                "library" => "Save to your photo library, where other apps can see it".to_string(),
+                "mail" => "Read and send mail from accounts you sign in to on the device".to_string(),
                 other => format!("Use {other}"),
             });
         }
@@ -175,5 +180,39 @@ pub(crate) fn canonical(value: &serde_json::Value) -> String {
         }
         serde_json::Value::Array(items) => format!("[{}]", items.iter().map(canonical).collect::<Vec<_>>().join(",")),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_known_capability_is_told_in_plain_words() {
+        let manifest = AppManifest::parse(
+            &serde_json::json!({
+                "schema": 1, "id": "dev.example.app", "version": "1", "name": "App",
+                "integrity": {"bundle_blake3": ""},
+                "capabilities": octosense_app_policy::KNOWN_CAPABILITIES,
+                "network": {"hosts": ["api.example.com"]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let entry = Entry {
+            artifact: String::new(),
+            manifest,
+            listing: None,
+            publisher: String::new(),
+            publisher_key: String::new(),
+            source: Source { repository: String::new(), commit: String::new() },
+            status: Status::Offered,
+            admitted: String::new(),
+        };
+        let lines = entry.permissions_summary();
+        assert_eq!(lines.len(), octosense_app_policy::KNOWN_CAPABILITIES.len());
+        for (capability, line) in octosense_app_policy::KNOWN_CAPABILITIES.iter().zip(&lines) {
+            assert_ne!(line, &format!("Use {capability}"), "{capability} has no plain-words line");
+        }
     }
 }

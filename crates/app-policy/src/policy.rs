@@ -45,6 +45,24 @@ impl Default for HostLimits {
     }
 }
 
+impl HostLimits {
+    /// Ceilings for a system app: a bundle that ships inside the build, like
+    /// News or Photos, contained like any installed app but living for as
+    /// long as the person keeps it open. An installed card's budget is sized
+    /// for a card; an app that is used for an hour needs room for an hour.
+    /// A system app is part of the signed build, so it is admitted by its
+    /// digest alone.
+    pub fn system() -> Self {
+        HostLimits {
+            max_storage_bytes: 64 * 1024 * 1024,
+            max_instruction_budget: 4_000_000_000,
+            max_memory_bytes: 128 * 1024 * 1024,
+            require_signature: false,
+            ..HostLimits::default()
+        }
+    }
+}
+
 /// What the app gets. Produced only by [`resolve`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppPolicy {

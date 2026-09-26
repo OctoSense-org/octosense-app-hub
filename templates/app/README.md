@@ -1,5 +1,7 @@
 # Hub app starter
 
+English | [简体中文](README.zh-CN.md)
+
 Copy this directory into a new app repository, following
 [Build your first Hub app](https://github.com/OctoSense-org/OctoSense-App-Hub/blob/main/docs/FIRST-APP.md).
 This is a **metadata scaffold**, not a runnable or publishable demo.
@@ -13,7 +15,8 @@ Before publication:
   platforms actually tested; choose the license for your own app.
 - Replace `bundle/assets/icon.svg` with your app's artwork.
 - Generate and review `bundle/page.card`, optional `page.data.json`, its `kit/`
-  directory and local assets using the AppCard workflow.
+  directory and local assets using the image-to-card flow in
+  OctoScript-App-Design-Flow (`flows/image-to-card/FLOW.md`).
 - Run it in the reference host and capture `bundle/screenshots/01-main.png`.
 - Stamp, check, review, sign and submit the completed `bundle/` directory.
 

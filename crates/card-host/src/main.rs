@@ -1,13 +1,19 @@
 //! Run one card bundle under its own policy.
 //!
 //! ```sh
-//! card-host --bundle <dir> [--app-data <dir>] [--allow-unsigned] [--stamp]
+//! card-host --bundle <dir> [--app-data <dir>] [--allow-unsigned] [--stamp] [--system]
+//!           [--static <prefix>=<dir>]...
 //! ```
 //!
 //! The bundle is a directory holding `manifest.json`, `page.card`,
 //! `page.data.json` and a `kit/` directory. `--stamp` rewrites the manifest's
 //! digest to match the directory, which is what a build step does before
-//! signing; without it a bundle whose bytes changed is refused.
+//! signing; without it a bundle whose bytes changed is refused. `--system`
+//! admits the bundle as a system app is admitted (by digest, under
+//! `HostLimits::system`), for developing one; an empty digest in its
+//! manifest is filled in memory, as the build fills it in the packed copy.
+//! `--static photos=<dir>` serves `<dir>`'s files at `photos/...` from memory,
+//! the way a shell serves a system app's compiled-in artwork.
 //!
 //! The order is the one ADR 0002 fixes: admit, resolve, apply, then evaluate.
 //! Nothing here may widen what the manifest asked for, and the two settings
@@ -29,8 +35,9 @@ script_mod! {
                 window.inner_size: vec2(412, 892)
                 pass +: { clear_color: #fff }
                 body +: {
-                    padding: 0 margin: 0 spacing: 0
+                    padding: 0 margin: 0 spacing: 0 flow: Overlay
                     card := Splash { width: Fill height: Fill }
+                    sheet := Splash { visible: false width: Fill height: Fill }
                 }
             }
         }
@@ -45,6 +52,10 @@ pub struct App {
     mounted: bool,
     #[rust]
     assets: Option<octosense_app_policy::AssetServer>,
+    #[rust]
+    app_id: String,
+    #[rust]
+    host_dir: PathBuf,
 }
 
 struct Args {
@@ -52,6 +63,8 @@ struct Args {
     app_data: PathBuf,
     allow_unsigned: bool,
     stamp: bool,
+    system: bool,
+    statics: Vec<(String, PathBuf)>,
 }
 
 fn args() -> Args {
@@ -64,7 +77,28 @@ fn args() -> Args {
             .unwrap_or_else(|| std::env::temp_dir().join("octosense-card-apps")),
         allow_unsigned: argv.iter().any(|a| a == "--allow-unsigned"),
         stamp: argv.iter().any(|a| a == "--stamp"),
+        system: argv.iter().any(|a| a == "--system"),
+        statics: argv
+            .windows(2)
+            .filter(|w| w[0] == "--static")
+            .filter_map(|w| w[1].split_once('=').map(|(p, d)| (p.trim_matches('/').to_string(), PathBuf::from(d))))
+            .collect(),
     }
+}
+
+/// Read `--static` directories into memory for the life of the process.
+fn load_statics(mounts: &[(String, PathBuf)]) -> octosense_app_policy::StaticAssets {
+    let mut out: Vec<(&'static str, &'static [u8])> = Vec::new();
+    for (prefix, dir) in mounts {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let name = format!("{prefix}/{}", entry.file_name().to_string_lossy());
+            out.push((Box::leak(name.into_boxed_str()), Box::leak(bytes.into_boxed_slice())));
+        }
+    }
+    Box::leak(out.into_boxed_slice())
 }
 
 /// Admit the bundle and resolve what it gets. Refusals are fatal: a card that
@@ -83,7 +117,21 @@ fn policy_for(args: &Args) -> Result<AppPolicy, String> {
         log!("card-host: stamped {} with digest {}", manifest_path.display(), digest);
     }
 
-    let limits = HostLimits { require_signature: !args.allow_unsigned, ..HostLimits::default() };
+    // A system app's source manifest leaves its digest empty: the build
+    // stamps it into the packed copy. Developing one, stamp it in memory.
+    if args.system && !args.stamp {
+        let mut value: serde_json::Value = serde_json::from_str(&manifest_json).map_err(|e| e.to_string())?;
+        if value["integrity"]["bundle_blake3"].as_str().unwrap_or("").is_empty() {
+            value["integrity"]["bundle_blake3"] = serde_json::Value::String(digest.clone());
+            manifest_json = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let limits = if args.system {
+        HostLimits::system()
+    } else {
+        HostLimits { require_signature: !args.allow_unsigned, ..HostLimits::default() }
+    };
     // The digest is computed from the directory, so the manifest's claim is
     // checked against what is actually there.
     admit_and_resolve_dir(&manifest_json, &digest, &limits, &RefuseAllSignatures)
@@ -93,7 +141,6 @@ fn policy_for(args: &Args) -> Result<AppPolicy, String> {
 /// that ships in the bundle. Nothing is read from outside the bundle.
 fn card_source(bundle: &Path, asset_origin: &str) -> Result<String, String> {
     octosense_app_validator::card_source(bundle, asset_origin)
-
 }
 
 /// Give every card isolate the kit vocabulary it needs to draw.
@@ -114,6 +161,7 @@ fn register_card_vocabulary() {
     }
     register_splash_isolate_mod(design);
     register_splash_isolate_mod(kit);
+    register_splash_isolate_mod(makepad_widgets::splash::register_agent_module);
 }
 
 impl App {
@@ -136,6 +184,8 @@ impl App {
             policy.agent.as_ref().map(|a| a.profile.as_kernel_mode()).unwrap_or("none"),
         );
 
+        self.app_id = policy.app_id.clone();
+        self.host_dir = args.app_data.join(".host");
         let mut settings = policy.isolate_settings(&args.app_data);
         if let Err(e) = std::fs::create_dir_all(&settings.jail_root) {
             error!("card-host: cannot make the app's jail at {}: {e}", settings.jail_root.display());
@@ -144,7 +194,7 @@ impl App {
         // The app's artwork is served from a loopback origin of our own,
         // serving only its bundle, and that origin — this port, no other — is
         // the one loopback entry the isolate may reach.
-        let server = match octosense_app_policy::AssetServer::start(&args.bundle) {
+        let server = match octosense_app_policy::AssetServer::start_with_static(&args.bundle, load_statics(&args.statics)) {
             Ok(server) => server,
             Err(e) => {
                 error!("card-host: cannot serve the app's artwork: {e}");
@@ -199,5 +249,9 @@ impl AppMain for App {
             self.mount(cx);
         }
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        // Host services (a sheet the service raises, answers from its
+        // workers), exactly as the Card runner does.
+        let (card, sheet) = (self.ui.splash(cx, ids!(card)), self.ui.splash(cx, ids!(sheet)));
+        octosense_appstore::services::pump(cx, &self.app_id, &self.host_dir, &card, &sheet);
     }
 }

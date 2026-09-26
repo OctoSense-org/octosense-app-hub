@@ -151,7 +151,17 @@ pub fn privacy_summary(manifest: &AppManifest) -> Vec<String> {
     if has("ledger.read") {
         lines.push("Reads your shared data.".to_string());
     }
-    for (cap, text) in [("location", "Uses your location."), ("camera", "Uses the camera."), ("clipboard", "Uses the clipboard."), ("prompt", "May ask you questions.")] {
+    for (cap, text) in [
+        ("location", "Uses your location."),
+        ("camera", "Uses the camera."),
+        ("clipboard", "Uses the clipboard."),
+        ("prompt", "May ask you questions."),
+        ("images", "Shows pictures from any website its content links to."),
+        ("web", "Opens web pages, which cannot reach back into the app."),
+        ("microphone", "Records sound with videos."),
+        ("library", "Saves photos and videos to your photo library."),
+        ("mail", "Reads and sends mail from accounts you add; it never sees your password."),
+    ] {
         if has(cap) {
             lines.push(text.to_string());
         }

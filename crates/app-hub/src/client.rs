@@ -273,6 +273,11 @@ impl Store {
         today: &str,
     ) -> Result<AppPolicy, String> {
         self.installs_allowed(today)?;
+        // System apps ship with the build; a download may never take one's id,
+        // and with it that app's jail.
+        if app_id.starts_with("os.") {
+            return Err(format!("{app_id} names a system app, which no store may install"));
+        }
         let entry = self.entry(app_id).ok_or_else(|| format!("{app_id} is not in the catalog"))?;
         if let crate::index::Status::Withdrawn(reason) = &entry.status {
             return Err(format!("{app_id} has been withdrawn: {reason}"));

@@ -24,7 +24,9 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 
 pub mod cardapp;
+pub mod services;
 pub mod source;
+pub mod system;
 pub mod ui;
 
 pub use makepad_widgets;
@@ -452,10 +454,17 @@ pub(crate) fn register_card_vocabulary() {
         }
         makepad_widgets::widget_async::register_splash_isolate_mod(design);
         makepad_widgets::widget_async::register_splash_isolate_mod(kit);
+        // `sys`: places, routes, weather and the other live-data helpers a
+        // script app reads, every fetch held to the app's host list, the
+        // device's location to its `location` grant. It also carries
+        // `agent.notify`, which an app under a policy may call only with the
+        // `agent` grant.
+        makepad_widgets::widget_async::register_splash_isolate_mod(makepad_widgets::splash::register_agent_module);
     });
 }
 
-/// Lower a card bundle to isolate source. Nothing outside the bundle is read.
+/// Lower a bundle to isolate source. Nothing outside the bundle is read. A
+/// script app's program runs as it is; a card is lowered to widgets.
 pub(crate) fn card_source(bundle: &std::path::Path, asset_origin: &str) -> Result<String, String> {
     octosense_app_validator::card_source(bundle, asset_origin)
 }

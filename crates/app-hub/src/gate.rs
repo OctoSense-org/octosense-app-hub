@@ -11,7 +11,7 @@ use std::path::Path;
 /// Everything a bundle may hold besides its manifest, by extension. A bundle
 /// is cards, data and artwork; anything else is a refusal, so a publisher
 /// cannot smuggle a payload the checks do not understand.
-const ALLOWED_EXTENSIONS: &[&str] = &["card", "json", "l0", "octoscript", "svg", "png", "jpg", "jpeg", "webp", "ttf", "otf", "txt", "md"];
+const ALLOWED_EXTENSIONS: &[&str] = &["card", "json", "l0", "octoscript", "splash", "svg", "png", "jpg", "jpeg", "webp", "ttf", "otf", "txt", "md"];
 
 /// Ceiling for a whole bundle. Cards are text and artwork; a bundle bigger
 /// than this is either shipping something it should not, or should be split.
@@ -138,6 +138,16 @@ pub fn check_bundle(
         None => findings.push(Finding::warn("publisher-signature", "unsigned: accountability rests on the hub alone")),
     }
 
+    // ---- identity ------------------------------------------------------
+    // Ids under `os.` are the system apps' (appstore::system): every device
+    // refuses to install one from a store, so the hub refuses to offer one.
+    if manifest.id.starts_with("os.") {
+        findings.push(Finding::refuse(
+            "identity",
+            format!("{} is under os., which is reserved for system apps that ship with the device", manifest.id),
+        ));
+    }
+
     // ---- contents -------------------------------------------------------
     let mut total = 0u64;
     for file in files.iter().filter(|f| f.path != Path::new(octosense_app_policy::MANIFEST_FILE)).map(|f| &f.path) {
@@ -161,10 +171,22 @@ pub fn check_bundle(
     // images over HTTP, because the resource loader is not the network module
     // the grant gates. Until that is closed in the runtime, the gate is what
     // keeps a bundle from reaching outside itself.
-    for reference in external_references(bundle, &files)? {
+    for reference in external_references(bundle, &files, &manifest)? {
         findings.push(Finding::refuse(
             "assets",
             format!("{reference} points outside the bundle; ship the asset with the app"),
+        ));
+    }
+
+    // ---- secrets are the host's ----------------------------------------
+    // A contained app never collects a password, a PIN or a code: the host's
+    // sheet does, for the service that needs it (appstore::services). The
+    // runtime makes such a field inert; the gate refuses the bundle, so a
+    // publisher learns it before a person meets a dead field.
+    for field in secret_fields(bundle, &files)? {
+        findings.push(Finding::refuse(
+            "secrets",
+            format!("{field}: apps may not ask for passwords or codes; a host service collects them on its own sheet"),
         ));
     }
 
@@ -228,7 +250,7 @@ pub fn check_bundle(
 /// Anything in the bundle's text that reaches outside it: an absolute URL, or
 /// a path that climbs out. Cards name their artwork in text, so this is a
 /// textual check by necessity; it is a gate, not the runtime's enforcement.
-fn external_references(root: &Path, files: &[crate::admission::BundleFile]) -> Result<Vec<String>, String> {
+fn external_references(root: &Path, files: &[crate::admission::BundleFile], manifest: &AppManifest) -> Result<Vec<String>, String> {
     let mut found = Vec::new();
     for file in files.iter().map(|f| &f.path) {
         // The two metadata files carry URLs on purpose (a support page, a
@@ -238,18 +260,74 @@ fn external_references(root: &Path, files: &[crate::admission::BundleFile]) -> R
             continue;
         }
         let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if !matches!(extension.as_str(), "card" | "json" | "l0" | "octoscript" | "txt" | "md") {
+        if !matches!(extension.as_str(), "card" | "json" | "l0" | "octoscript" | "splash" | "txt" | "md") {
             continue;
         }
         let text = match crate::admission::read_text(&root.join(&file), crate::admission::MAX_TEXT_BYTES) {
             Ok(text) => text,
             Err(_) => continue, // not valid text: the extension check already covers it
         };
+        if extension == "splash" {
+            found.extend(script_references(&file, &text, manifest));
+            continue;
+        }
+        if !matches!(extension.as_str(), "card" | "json" | "l0" | "octoscript" | "txt" | "md") {
+            continue;
+        }
         for needle in ["http://", "https://", "file://", "../"] {
             if let Some(at) = text.find(needle) {
                 let snippet: String = text[at..].chars().take(60).collect();
                 found.push(format!("{} contains {}", file.display(), snippet.replace('\n', " ")));
                 break;
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// A script app fetches what it declares (ADR 0004): an `https://` address
+/// may name only a host in the manifest's `network.hosts`, or any public host
+/// when the app is granted `images` (pictures) or `web` (a web view). Plain
+/// `http://`, `file://` and paths out of the bundle are refused outright. The
+/// runtime holds the app to the same list on every request; this refuses the
+/// bundle before a person installs it.
+fn script_references(file: &Path, text: &str, manifest: &AppManifest) -> Vec<String> {
+    let mut found = Vec::new();
+    for needle in ["http://", "file://", "../"] {
+        if let Some(at) = text.find(needle) {
+            let snippet: String = text[at..].chars().take(60).collect();
+            found.push(format!("{} contains {}", file.display(), snippet.replace('\n', " ")));
+        }
+    }
+    let any_public = manifest.capabilities.iter().any(|c| c == "images" || c == "web");
+    let mut rest = text;
+    while let Some(at) = rest.find("https://") {
+        rest = &rest[at + "https://".len()..];
+        let host: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-').collect::<String>().to_ascii_lowercase();
+        // `https://` followed by an interpolation or nothing names no host.
+        if host.is_empty() || any_public || manifest.network.hosts.iter().any(|h| h.eq_ignore_ascii_case(&host)) {
+            continue;
+        }
+        found.push(format!("{} reaches {host}, which the manifest does not declare in network.hosts", file.display()));
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Password and one-time-code fields declared in the bundle's scripts.
+fn secret_fields(root: &Path, files: &[crate::admission::BundleFile]) -> Result<Vec<String>, String> {
+    let mut found = Vec::new();
+    for file in files.iter().map(|file| &file.path) {
+        let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if !matches!(extension.as_str(), "card" | "l0" | "octoscript" | "splash") {
+            continue;
+        }
+        let Ok(text) = crate::admission::read_text(&root.join(file), crate::admission::MAX_TEXT_BYTES) else { continue };
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        for needle in ["is_password:true", "TextInputContentType.Password", "TextInputContentType.NewPassword", "TextInputContentType.OneTimeCode"] {
+            if compact.contains(needle) {
+                found.push(format!("{} declares {needle}", file.display()));
             }
         }
     }
@@ -295,4 +373,83 @@ pub fn entry_for(
         status: crate::index::Status::Offered,
         admitted: admitted.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_script_app_reaches_only_the_hosts_it_declares() {
+        let dir = std::env::temp_dir().join(format!("gate-script-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("main.splash"),
+            "fn load(){ net.http_request({url: \"https://api.example.com/v1\"}, fn(r){}) }\nlet more = \"https://tracker.example.net/p\"\nImage{src: \"{{assets}}/a.png\"}",
+        )
+        .unwrap();
+        let manifest = |caps: &[&str], hosts: &[&str]| {
+            AppManifest::parse(&serde_json::json!({
+                "schema": 1, "id": "dev.example.app", "version": "1.0.0", "name": "App",
+                "integrity": {"bundle_blake3": ""}, "capabilities": caps, "network": {"hosts": hosts}
+            }).to_string()).unwrap()
+        };
+        let files = crate::admission::inventory(&dir).unwrap();
+        let refused = external_references(&dir, &files, &manifest(&["net"], &["api.example.com"])).unwrap();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("tracker.example.net"));
+        assert!(external_references(&dir, &files, &manifest(&["net"], &["api.example.com", "tracker.example.net"])).unwrap().is_empty());
+        assert!(external_references(&dir, &files, &manifest(&["net", "images"], &["api.example.com"])).unwrap().is_empty(), "images reaches any public host");
+        std::fs::write(dir.join("main.splash"), "let x = \"http://api.example.com\"").unwrap();
+        assert!(!external_references(&dir, &files, &manifest(&["net", "web"], &["api.example.com"])).unwrap().is_empty(), "plain http is never allowed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_store_bundle_may_not_take_a_system_app_id() {
+        let dir = std::env::temp_dir().join(format!("gate-os-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.splash"), "Label{text: \"hi\"}").unwrap();
+        let write = |id: &str| {
+            std::fs::write(
+                dir.join(octosense_app_policy::MANIFEST_FILE),
+                serde_json::json!({"schema": 1, "id": id, "version": "1.0.0", "name": "App", "integrity": {"bundle_blake3": ""}}).to_string(),
+            )
+            .unwrap()
+        };
+        let limits = HostLimits { require_signature: false, ..HostLimits::default() };
+        let identity = |dir: &Path| {
+            check_bundle(dir, &limits, &octosense_app_policy::RefuseAllSignatures, None)
+                .unwrap()
+                .findings
+                .into_iter()
+                .filter(|f| f.check == "identity")
+                .count()
+        };
+        write("os.mail");
+        assert_eq!(identity(&dir), 1, "os. ids belong to system apps");
+        write("dev.example.mail");
+        assert_eq!(identity(&dir), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bundle_that_asks_for_a_password_is_refused() {
+        let dir = std::env::temp_dir().join(format!("gate-secrets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cards")).unwrap();
+        std::fs::write(dir.join("main.card"), "View{ name := TextInput{empty_text: \"Name\"} }").unwrap();
+        std::fs::write(dir.join("cards/login.card"), "View{ pw := TextInput{ is_password : true } }").unwrap();
+        std::fs::write(dir.join("cards/otp.card"), "TextInput{content_type: TextInputContentType.OneTimeCode}").unwrap();
+        std::fs::write(dir.join("notes.md"), "Set is_password: true in your own app, not here.").unwrap();
+        let files = crate::admission::inventory(&dir).unwrap();
+        let mut found = secret_fields(&dir, &files).unwrap();
+        found.sort();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].contains("login.card") && found[0].contains("is_password"));
+        assert!(found[1].contains("otp.card") && found[1].contains("OneTimeCode"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

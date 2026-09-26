@@ -4,6 +4,10 @@ use std::path::Path;
 use octosense_app_hub::admission::{read_text, MAX_TEXT_BYTES};
 
 pub fn card_source(bundle: &Path, asset_origin: &str) -> Result<String, String> {
+    if bundle.join(octosense_app_policy::SCRIPT_ENTRY).is_file() {
+        let source = read_text(&bundle.join(octosense_app_policy::SCRIPT_ENTRY), MAX_TEXT_BYTES)?;
+        return Ok(source.replace(octosense_app_policy::ASSETS_PLACEHOLDER, asset_origin.trim_end_matches('/')));
+    }
     let card = read_text(&bundle.join("page.card"), 256 * 1024)?;
     let data_path = bundle.join("page.data.json");
     let text = if data_path.exists() { read_text(&data_path, MAX_TEXT_BYTES)? } else { "{}".into() };

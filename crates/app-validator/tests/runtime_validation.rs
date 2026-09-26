@@ -13,6 +13,21 @@ fn valid_template_prepares_with_installed_host_path() {
 }
 
 #[test]
+fn script_bundle_prepares_without_a_card() {
+    let mut f = Fixture::new();
+    fs::remove_file(f.bundle.join("page.card")).unwrap();
+    fs::remove_file(f.bundle.join("page.data.json")).unwrap();
+    fs::remove_dir_all(f.bundle.join("kit")).unwrap();
+    fs::write(f.bundle.join("main.splash"), "HostedView{width: Fill height: Fill full: View{width: Fill height: Fill Label{text: \"Hello\"}} tile: View{width: Fill height: Fill Label{text: \"Hello\"}}}").unwrap();
+    f.sign();
+    assert!(f.report(None).passed());
+    let source = octosense_app_validator::card_source(&f.bundle, "http://127.0.0.1:1/").unwrap();
+    assert!(source.contains("Hello"));
+    let result = Command::new(env!("CARGO_BIN_EXE_app-validator")).arg(&f.bundle).output().unwrap();
+    assert!(result.status.success(), "{} {}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+}
+
+#[test]
 fn unresolved_runtime_component_is_refused() {
     let mut f = Fixture::new();
     let path = f.bundle.join("kit/native/light/kit.json");

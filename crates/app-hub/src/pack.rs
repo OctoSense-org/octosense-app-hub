@@ -78,6 +78,36 @@ pub fn unpack(pack: &Pack, into: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A system app packed for a shell's build script: the bundle directory
+/// `dir` with the digest of exactly its files stamped into the packed
+/// manifest (the source manifest leaves it empty), plus the id and name a
+/// launcher shows. `include_str!` the JSON and register it as a SystemApp.
+pub struct PackedSystemApp {
+    pub id: String,
+    pub name: String,
+    pub pack_json: String,
+}
+
+pub fn pack_system_app(dir: &Path) -> Result<PackedSystemApp, String> {
+    let mut pack = pack_dir(dir)?;
+    let digest = octosense_app_policy::digest_dir(dir)?;
+    let encoded = pack
+        .files
+        .get(octosense_app_policy::MANIFEST_FILE)
+        .ok_or_else(|| format!("{}: no {}", dir.display(), octosense_app_policy::MANIFEST_FILE))?;
+    let raw = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|e| e.to_string())?;
+    let mut manifest: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| format!("manifest: {e}"))?;
+    manifest["integrity"]["bundle_blake3"] = serde_json::Value::String(digest);
+    let id = manifest["id"].as_str().ok_or("manifest has no id")?.to_string();
+    let name = manifest["name"].as_str().ok_or("manifest has no name")?.to_string();
+    let stamped = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
+    pack.files.insert(
+        octosense_app_policy::MANIFEST_FILE.to_string(),
+        base64::engine::general_purpose::STANDARD.encode(stamped),
+    );
+    Ok(PackedSystemApp { id, name, pack_json: serde_json::to_string(&pack).map_err(|e| e.to_string())? })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +132,21 @@ mod tests {
         unpack(&pack, &out).unwrap();
         assert_eq!(before, octosense_app_policy::digest_dir(&out).unwrap());
         assert_eq!(std::fs::read(out.join("manifest.json")).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn a_packed_system_app_carries_the_digest_of_its_files() {
+        let dir = scratch("system");
+        std::fs::write(dir.join("manifest.json"), br#"{"schema":1,"id":"os.demo","version":"1","name":"Demo","integrity":{"bundle_blake3":""}}"#).unwrap();
+        let packed = pack_system_app(&dir).unwrap();
+        assert_eq!((packed.id.as_str(), packed.name.as_str()), ("os.demo", "Demo"));
+        let pack: Pack = serde_json::from_str(&packed.pack_json).unwrap();
+        let out = dir.with_extension("system-unpacked");
+        let _ = std::fs::remove_dir_all(&out);
+        unpack(&pack, &out).unwrap();
+        let manifest = std::fs::read_to_string(out.join("manifest.json")).unwrap();
+        let manifest = octosense_app_policy::AppManifest::parse(&manifest).unwrap();
+        assert_eq!(manifest.integrity.bundle_blake3, octosense_app_policy::digest_dir(&out).unwrap());
     }
 
     #[test]

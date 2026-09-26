@@ -112,7 +112,7 @@ pub fn validate(root: &Path, files: &[BundleFile]) -> (Vec<Finding>, Vec<Resourc
         let path = root.join(&file.path);
         let extension = file.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
         let result = match extension.as_str() {
-            "card" | "json" | "l0" | "octoscript" | "txt" | "md" => read_text(&path, MAX_TEXT_BYTES).and_then(|text| {
+            "card" | "json" | "l0" | "octoscript" | "splash" | "txt" | "md" => read_text(&path, MAX_TEXT_BYTES).and_then(|text| {
                 if extension == "json" {
                     let value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
                     if name != "manifest.json" && name != "listing.json" {
@@ -138,7 +138,13 @@ pub fn validate(root: &Path, files: &[BundleFile]) -> (Vec<Finding>, Vec<Resourc
         };
         if let Err(error) = result { findings.push(Finding::at("contents-invalid", name.as_ref(), error)); }
     }
-    if let Err((path, error)) = validate_card(root) { findings.push(Finding::at("card-invalid", path, error)); }
+    if files.iter().any(|file| file.path == Path::new(octosense_app_policy::SCRIPT_ENTRY)) {
+        if let Err(error) = read_text(&root.join(octosense_app_policy::SCRIPT_ENTRY), MAX_TEXT_BYTES) {
+            findings.push(Finding::at("script-invalid", octosense_app_policy::SCRIPT_ENTRY, error));
+        }
+    } else if let Err((path, error)) = validate_card(root) {
+        findings.push(Finding::at("card-invalid", path, error));
+    }
     for reference in &refs {
         if matches!(reference.kind, ResourceKind::DisplayUrl) { continue; }
         if matches!(reference.kind, ResourceKind::Font) && reference.target == "makepad_widgets:resources/Inter.ttf" { continue; }

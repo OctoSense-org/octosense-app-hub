@@ -17,6 +17,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// Files served by path that live in the binary rather than in the bundle
+/// directory: a system app's large artwork, compiled in once instead of
+/// being packed, unpacked and hashed. Paths are bundle-relative
+/// (`photos/01.png`).
+pub type StaticAssets = &'static [(&'static str, &'static [u8])];
+
 pub struct AssetServer {
     origin: String,
     port: u16,
@@ -27,6 +33,11 @@ impl AssetServer {
     /// Serve `root` on loopback. Returns a server whose `origin()` is the
     /// base URL a lowered card should use.
     pub fn start(root: &Path) -> Result<AssetServer, String> {
+        Self::start_with_static(root, &[])
+    }
+
+    /// Serve `root`, and `statics` by exact path ahead of it.
+    pub fn start_with_static(root: &Path, statics: StaticAssets) -> Result<AssetServer, String> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("asset server: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         listener.set_nonblocking(false).map_err(|e| e.to_string())?;
@@ -42,7 +53,7 @@ impl AssetServer {
                 // Accepted sockets inherit non-blocking mode on macOS; a
                 // blocking read is what the rest of this expects.
                 let _ = stream.set_nonblocking(false);
-                let _ = serve_one(&mut stream, &root);
+                let _ = serve_one(&mut stream, &root, statics);
             }
         });
         Ok(AssetServer { origin: format!("http://127.0.0.1:{port}/"), port, stop })
@@ -67,7 +78,7 @@ impl Drop for AssetServer {
     }
 }
 
-fn serve_one(stream: &mut std::net::TcpStream, root: &Path) -> std::io::Result<()> {
+fn serve_one(stream: &mut std::net::TcpStream, root: &Path, statics: StaticAssets) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request = String::new();
     reader.read_line(&mut request)?;
@@ -81,19 +92,23 @@ fn serve_one(stream: &mut std::net::TcpStream, root: &Path) -> std::io::Result<(
         }
     }
     let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+    let wanted = percent_decode(path.split('?').next().unwrap_or("").trim_start_matches('/'));
+    if let Some((name, bytes)) = statics.iter().find(|(name, _)| *name == wanted) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+            mime_for(Path::new(name)),
+            bytes.len()
+        )?;
+        stream.write_all(bytes)?;
+        return stream.flush();
+    }
     match resolve(root, &path) {
         Some(file) => {
             let mut bytes = Vec::new();
             match std::fs::File::open(&file).and_then(|mut f| f.read_to_end(&mut bytes)) {
                 Ok(_) => {
-                    let mime = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
-                        "svg" => "image/svg+xml",
-                        "png" => "image/png",
-                        "jpg" | "jpeg" => "image/jpeg",
-                        "webp" => "image/webp",
-                        "json" => "application/json",
-                        _ => "application/octet-stream",
-                    };
+                    let mime = mime_for(&file);
                     write!(
                         stream,
                         "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
@@ -107,6 +122,17 @@ fn serve_one(stream: &mut std::net::TcpStream, root: &Path) -> std::io::Result<(
         None => not_found(stream)?,
     }
     stream.flush()
+}
+
+fn mime_for(file: &Path) -> &'static str {
+    match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
 }
 
 fn not_found(stream: &mut std::net::TcpStream) -> std::io::Result<()> {

@@ -109,6 +109,8 @@ impl AppHostView {
             storage,
             viewport: makepad_app_module::Viewport { size },
             replies,
+            // One window: a module that opens more is told it cannot.
+            windows: Default::default(),
         };
         // The isolate's own network stays off, as it is in the shell: a
         // module that needs the network declares `net` and does it from
