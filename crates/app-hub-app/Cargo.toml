@@ -11,9 +11,9 @@ publish = false
 description = "The App Hub shell integration: store module, Card runner, system apps and icons"
 
 [dependencies]
-makepad-widgets = { git = "https://github.com/OctoSense-org/makepad.git", rev = "7786bb4a32d3282197699eefd2f2e9defbcf2d53" }
-makepad-app-module = { git = "https://github.com/OctoSense-org/makepad.git", rev = "7786bb4a32d3282197699eefd2f2e9defbcf2d53" }
-makepad-wm-theme = { git = "https://github.com/OctoSense-org/makepad.git", rev = "7786bb4a32d3282197699eefd2f2e9defbcf2d53" }
+makepad-widgets = { git = "https://github.com/OctoSense-org/makepad.git", rev = "cd812acde910e9c4523f83509356450eb8edf908" }
+makepad-app-module = { git = "https://github.com/OctoSense-org/makepad.git", rev = "cd812acde910e9c4523f83509356450eb8edf908" }
+makepad-wm-theme = { git = "https://github.com/OctoSense-org/makepad.git", rev = "cd812acde910e9c4523f83509356450eb8edf908" }
 octosense-app-hub = { path = "../app-hub" }
 octosense-app-policy = { path = "../app-policy" }
 octosense-appstore = { path = "../appstore" }
